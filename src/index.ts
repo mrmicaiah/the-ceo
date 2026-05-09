@@ -46,9 +46,14 @@ export default {
       const [, employeeId, subpath] = employeeMatch;
       const doId = env.EMPLOYEE_DO.idFromName(employeeId);
       const stub = env.EMPLOYEE_DO.get(doId);
+      // Pass employee id to the DO via header — DOs accessed by idFromName
+      // can't recover their own name from state, and a header beats stuffing
+      // it into the path or the body.
+      const headers = new Headers(request.headers);
+      headers.set("X-Employee-Id", employeeId);
       return stub.fetch(new Request(`http://do${subpath || "/"}`, {
         method: request.method,
-        headers: request.headers,
+        headers,
         body: request.body,
       }));
     }

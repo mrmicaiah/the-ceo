@@ -1,4 +1,5 @@
 import { Env, EmployeeId, Employee } from "../types";
+import { handleChatTurn } from "../lib/chat";
 
 /** Character sheets — the permanent foundation of each employee's system prompt */
 const CHARACTER_SHEETS: Record<EmployeeId, { name: string; role: string; sheet: string }> = {
@@ -24,6 +25,8 @@ const CHARACTER_SHEETS: Record<EmployeeId, { name: string; role: string; sheet: 
   },
 };
 
+const VALID_IDS: ReadonlySet<string> = new Set(Object.keys(CHARACTER_SHEETS));
+
 export class EmployeeDO implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
@@ -37,57 +40,98 @@ export class EmployeeDO implements DurableObject {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    const employeeId = this.resolveEmployeeId(request);
+    if (!employeeId) {
+      return new Response("Missing or invalid X-Employee-Id header", { status: 400 });
+    }
+
     switch (path) {
       case "/chat":
-        return this.handleChat(request);
+        return this.handleChat(request, employeeId);
       case "/profile":
-        return this.getProfile(request);
+        return this.getProfile(employeeId);
       case "/notes":
-        return request.method === "GET" ? this.getNotes() : this.updateNotes(request);
+        return request.method === "GET"
+          ? this.getNotes(employeeId)
+          : this.updateNotes(request, employeeId);
       default:
         return new Response("Not found", { status: 404 });
     }
   }
 
-  /** Resolve which employee this DO instance represents */
-  private getEmployeeId(): EmployeeId {
-    // The employee ID is encoded in the DO name (set when the stub is created)
-    // Stored in durable storage on first access
-    // For now, default to extracting from the DO id name
-    return "dex"; // TODO: resolve from storage or DO id
+  /** Pull this DO's employee id from the routing header set by the worker. */
+  private resolveEmployeeId(request: Request): EmployeeId | null {
+    const id = request.headers.get("X-Employee-Id");
+    return id && VALID_IDS.has(id) ? (id as EmployeeId) : null;
   }
 
   /** Handle a chat message to this employee */
-  private async handleChat(request: Request): Promise<Response> {
-    const employeeId = this.getEmployeeId();
-    const character = CHARACTER_SHEETS[employeeId];
-    // TODO: load project briefing, task brief, employee notes,
-    //       build system prompt from character sheet + context,
-    //       call Claude API, stream response, persist messages
-    return new Response(JSON.stringify({
-      stub: true,
-      employee: character.name,
-      role: character.role,
-      message: `${character.name} chat not yet implemented`,
-    }), {
-      headers: { "Content-Type": "application/json" },
+  private async handleChat(request: Request, employeeId: EmployeeId): Promise<Response> {
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+    const body = (await request.json().catch(() => null)) as
+      | { chat_id?: string; message?: string }
+      | null;
+    if (!body?.message?.trim()) {
+      return new Response("Missing 'message' in body", { status: 400 });
+    }
+
+    const chatId = body.chat_id ?? crypto.randomUUID();
+    const systemPrompt = await this.buildSystemPrompt(employeeId);
+
+    const resp = await handleChatTurn({
+      db: this.env.DB,
+      chatId,
+      systemPrompt,
+      userMessage: body.message,
+      apiKey: this.env.ANTHROPIC_API_KEY,
+      employeeId,
     });
+
+    // Echo the chat id so the client can reuse it for subsequent turns.
+    const headers = new Headers(resp.headers);
+    headers.set("X-Chat-Id", chatId);
+    return new Response(resp.body, { status: resp.status, headers });
+  }
+
+  /**
+   * Compose the employee's system prompt: permanent character sheet plus any
+   * accumulated private notes about the principal. The notes section is
+   * appended as plain prose — short and labeled, not a JSON dump — so the
+   * model treats it as background, not structured data.
+   */
+  private async buildSystemPrompt(employeeId: EmployeeId): Promise<string> {
+    const character = CHARACTER_SHEETS[employeeId];
+    const notesRow = await this.env.DB.prepare(
+      "SELECT notes FROM employee_notes WHERE employee_id = ?",
+    )
+      .bind(employeeId)
+      .first<{ notes: string }>();
+    const userNotes = (notesRow?.notes ?? "").trim();
+
+    if (!userNotes.length) return character.sheet;
+    return `${character.sheet}\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`;
   }
 
   /** Get the employee's profile (character sheet + role) */
-  private async getProfile(_request: Request): Promise<Response> {
+  private async getProfile(employeeId: EmployeeId): Promise<Response> {
     // TODO: when notes management gets real, split this. /profile should return
     // employee config (id/name/role/character_sheet) — immutable, from constants.
     // /notes already exists for the mutable per-user notes. Currently /profile
     // bundles user_notes into the Employee payload for v0 simplicity.
-    const employeeId = this.getEmployeeId();
     const character = CHARACTER_SHEETS[employeeId];
+    const notesRow = await this.env.DB.prepare(
+      "SELECT notes FROM employee_notes WHERE employee_id = ?",
+    )
+      .bind(employeeId)
+      .first<{ notes: string }>();
     const profile: Employee = {
       id: employeeId,
       name: character.name,
       role: character.role,
       character_sheet: character.sheet,
-      user_notes: "",
+      user_notes: notesRow?.notes ?? "",
     };
     return new Response(JSON.stringify(profile), {
       headers: { "Content-Type": "application/json" },
@@ -95,17 +139,28 @@ export class EmployeeDO implements DurableObject {
   }
 
   /** Get this employee's accumulated notes about the user */
-  private async getNotes(): Promise<Response> {
-    // TODO: load from durable storage
-    return new Response(JSON.stringify({ notes: "" }), {
+  private async getNotes(employeeId: EmployeeId): Promise<Response> {
+    const row = await this.env.DB.prepare(
+      "SELECT notes, updated_at FROM employee_notes WHERE employee_id = ?",
+    )
+      .bind(employeeId)
+      .first<{ notes: string; updated_at: string }>();
+    return new Response(JSON.stringify(row ?? { notes: "", updated_at: null }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
   /** Update this employee's notes (called after meaningful interactions) */
-  private async updateNotes(request: Request): Promise<Response> {
-    const { notes } = (await request.json()) as { notes: string };
-    // TODO: persist to durable storage
+  private async updateNotes(request: Request, employeeId: EmployeeId): Promise<Response> {
+    const body = (await request.json().catch(() => null)) as { notes?: string } | null;
+    if (typeof body?.notes !== "string") {
+      return new Response("Missing 'notes' string in body", { status: 400 });
+    }
+    await this.env.DB.prepare(
+      "UPDATE employee_notes SET notes = ?, updated_at = datetime('now') WHERE employee_id = ?",
+    )
+      .bind(body.notes, employeeId)
+      .run();
     return new Response(JSON.stringify({ updated: true }), {
       headers: { "Content-Type": "application/json" },
     });

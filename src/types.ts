@@ -5,6 +5,8 @@ export interface Env {
   CEO_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
   EMPLOYEE_DO: DurableObjectNamespace;
+  // Secret — local: .dev.vars; prod: `npx wrangler secret put ANTHROPIC_API_KEY`
+  ANTHROPIC_API_KEY: string;
 }
 
 // ── Domain types (from data-model.md) ──────────────────────────────
