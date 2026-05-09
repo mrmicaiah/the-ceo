@@ -76,6 +76,10 @@ export class EmployeeDO implements DurableObject {
 
   /** Get the employee's profile (character sheet + role) */
   private async getProfile(_request: Request): Promise<Response> {
+    // TODO: when notes management gets real, split this. /profile should return
+    // employee config (id/name/role/character_sheet) — immutable, from constants.
+    // /notes already exists for the mutable per-user notes. Currently /profile
+    // bundles user_notes into the Employee payload for v0 simplicity.
     const employeeId = this.getEmployeeId();
     const character = CHARACTER_SHEETS[employeeId];
     const profile: Employee = {

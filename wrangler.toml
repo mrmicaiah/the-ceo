@@ -6,7 +6,7 @@ compatibility_date = "2024-12-18"
 [[d1_databases]]
 binding = "DB"
 database_name = "the-ceo-db"
-database_id = "placeholder-replace-after-creation"
+database_id = "4e2918b0-6ac0-4a1e-b865-0aa7962d2e8e"
 
 # Durable Objects
 [durable_objects]

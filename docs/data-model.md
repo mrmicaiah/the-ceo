@@ -75,17 +75,9 @@ StatusPing {
 
 Fixed roster. Four entries: Nora, Iris, Theo, Dex.
 
-```
-Employee {
-  id            // 'nora' | 'iris' | 'theo' | 'dex'
-  name
-  role
-  character_sheet  // permanent system prompt foundation
-  user_notes       // accumulated learnings about the user (private)
-}
-```
+The roster is **not a table**. Employees are constants in code (`id`, `name`, `role`, `character_sheet`) — see `src/durable-objects/employee.ts`. The character sheet is a permanent system-prompt foundation; treating it as code makes it diff-able and prevents accidental drift in production.
 
-The character sheet doesn't change. The user notes grow over time.
+The only mutable per-employee state is `user_notes` — accumulated learnings about the user, private to that employee. That lives in the `employee_notes` table, keyed by `employee_id`, with one row seeded per employee.
 
 ## Chat
 

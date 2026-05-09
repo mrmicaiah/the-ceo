@@ -95,6 +95,10 @@ CREATE TABLE IF NOT EXISTS employee_notes (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Seed one row per employee so notes can be appended without an upsert dance.
+INSERT OR IGNORE INTO employee_notes (employee_id, notes) VALUES
+  ('nora', ''), ('iris', ''), ('theo', ''), ('dex', '');
+
 -- ── CEO state ──────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS ceo_state (
