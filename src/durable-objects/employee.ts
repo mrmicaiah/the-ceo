@@ -1,31 +1,8 @@
 import { Env, EmployeeId, Employee } from "../types";
 import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
+import { CHARACTER_SHEETS, isEmployeeId } from "../lib/employees";
 
-/** Character sheets — the permanent foundation of each employee's system prompt */
-const CHARACTER_SHEETS: Record<EmployeeId, { name: string; role: string; sheet: string }> = {
-  nora: {
-    name: "Nora",
-    role: "Brainstormer",
-    sheet: `You are Nora, the Brainstormer. Quick, warm, sharp, curious. You build on ideas, follow threads, push back when someone rounds off too soon. You ask the question that makes people realize what they actually meant. You're comfortable saying "I might be wrong but —" and then saying the thing anyway. You use paragraphs more than bullets. You hold loose, productive conversation without forcing structure too early.`,
-  },
-  iris: {
-    name: "Iris",
-    role: "Critic",
-    sheet: `You are Iris, the Critic. Dry. Precise. You don't flatter and you don't apologize for not flattering. You care about the work being good, not about the conversation being pleasant. Short sentences. You catch drift between stated goals and actual work. You notice fuzzy thinking, vague language, unsupported claims. Underneath the precision: you're rooting for the person, which is why you're willing to be hard on the work.`,
-  },
-  theo: {
-    name: "Theo",
-    role: "Researcher",
-    sheet: `You are Theo, the Researcher. Methodical. Patient. Thorough without being exhausting. Skeptical of your own first findings — you check twice. You write clean reports: clear sections, claims tied to evidence, an honest "here's what I couldn't find out" at the end. In conversation, you're quieter than the others — you'd rather come back with the answer than think out loud.`,
-  },
-  dex: {
-    name: "Dex",
-    role: "Builder",
-    sheet: `You are Dex, the Builder. Technical. Low-ego. Practical. You've read the file they were about to ask about. You don't rush — you'd rather spend ten minutes drafting a good prompt than fire a sloppy one and clean up after it. Direct. You reference files and functions by name. Comfortable with code blocks. You say "the cleanest version of this is —" and then write it.`,
-  },
-};
-
-const VALID_IDS: ReadonlySet<string> = new Set(Object.keys(CHARACTER_SHEETS));
+const RECENT_REPORTS_LIMIT = 5;
 
 export class EmployeeDO implements DurableObject {
   private state: DurableObjectState;
@@ -62,23 +39,29 @@ export class EmployeeDO implements DurableObject {
   /** Pull this DO's employee id from the routing header set by the worker. */
   private resolveEmployeeId(request: Request): EmployeeId | null {
     const id = request.headers.get("X-Employee-Id");
-    return id && VALID_IDS.has(id) ? (id as EmployeeId) : null;
+    return isEmployeeId(id) ? id : null;
   }
 
-  /** Handle a chat message to this employee */
+  /**
+   * Handle a chat turn. Optional `project_id` in the body activates project
+   * casting — the system prompt grows to include the project briefing and
+   * this employee's recent reports on it.
+   */
   private async handleChat(request: Request, employeeId: EmployeeId): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
     const body = (await request.json().catch(() => null)) as
-      | { chat_id?: string; message?: string }
+      | { chat_id?: string; message?: string; project_id?: string }
       | null;
     if (!body?.message?.trim()) {
       return new Response("Missing 'message' in body", { status: 400 });
     }
 
     const chatId = body.chat_id ?? crypto.randomUUID();
-    const systemPrompt = await this.buildSystemPrompt(employeeId);
+    const projectId = body.project_id?.trim() || undefined;
+
+    const systemPrompt = await this.buildSystemPrompt(employeeId, projectId);
 
     const resp = await handleChatTurn({
       db: this.env.DB,
@@ -87,6 +70,7 @@ export class EmployeeDO implements DurableObject {
       userMessage: body.message,
       apiKey: this.env.ANTHROPIC_API_KEY,
       employeeId,
+      projectId,
       waitUntil: getStateWaitUntil(this.state),
     });
 
@@ -97,22 +81,76 @@ export class EmployeeDO implements DurableObject {
   }
 
   /**
-   * Compose the employee's system prompt: permanent character sheet plus any
-   * accumulated private notes about the principal. The notes section is
-   * appended as plain prose — short and labeled, not a JSON dump — so the
-   * model treats it as background, not structured data.
+   * Compose the employee's system prompt. Order: character sheet → project
+   * casting block (if cast) → private user notes. Project block carries the
+   * current briefing plus this employee's recent reports on the project — so
+   * Nora walks into a Project 3 chat already knowing what she's done there
+   * before.
    */
-  private async buildSystemPrompt(employeeId: EmployeeId): Promise<string> {
+  private async buildSystemPrompt(
+    employeeId: EmployeeId,
+    projectId?: string,
+  ): Promise<string> {
     const character = CHARACTER_SHEETS[employeeId];
+
+    let projectBlock = "";
+    if (projectId) {
+      const project = await this.env.DB.prepare(
+        `SELECT p.name, b.goal, b.state, b.next_move, b.why
+         FROM projects p
+         LEFT JOIN briefings b ON b.project_id = p.id
+         WHERE p.id = ?`,
+      )
+        .bind(projectId)
+        .first<{ name: string; goal: string; state: string; next_move: string; why: string }>();
+
+      if (project) {
+        const { results: reports } = await this.env.DB.prepare(
+          `SELECT what_happened, recommended_next_move, created_at
+           FROM reports
+           WHERE project_id = ? AND from_employee = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+        )
+          .bind(projectId, employeeId, RECENT_REPORTS_LIMIT)
+          .all<{ what_happened: string; recommended_next_move: string; created_at: string }>();
+
+        const lines: string[] = [];
+        lines.push(`## You're cast on this project: ${project.name}`);
+        lines.push("");
+        lines.push("Current briefing:");
+        lines.push(`- Goal: ${project.goal || "(not set)"}`);
+        lines.push(`- State: ${project.state || "(not set)"}`);
+        lines.push(`- Next move: ${project.next_move || "(not set)"}`);
+        lines.push(`- Why: ${project.why || "(not set)"}`);
+        lines.push("");
+        if (reports.length > 0) {
+          lines.push(
+            `Your last ${reports.length} report${reports.length === 1 ? "" : "s"} on this project (most recent first):`,
+          );
+          for (const r of reports) {
+            lines.push(
+              `- [${r.created_at}] Did: ${r.what_happened} | Recommended: ${r.recommended_next_move}`,
+            );
+          }
+        } else {
+          lines.push("You haven't filed any reports on this project yet.");
+        }
+        projectBlock = `\n\n${lines.join("\n")}`;
+      }
+    }
+
     const notesRow = await this.env.DB.prepare(
       "SELECT notes FROM employee_notes WHERE employee_id = ?",
     )
       .bind(employeeId)
       .first<{ notes: string }>();
     const userNotes = (notesRow?.notes ?? "").trim();
+    const notesBlock = userNotes
+      ? `\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`
+      : "";
 
-    if (!userNotes.length) return character.sheet;
-    return `${character.sheet}\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`;
+    return `${character.sheet}${projectBlock}${notesBlock}`;
   }
 
   /** Get the employee's profile (character sheet + role) */
