@@ -1,5 +1,5 @@
 import { Env, CEOState, StatusPing } from "../types";
-import { handleChatTurn } from "../lib/chat";
+import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
 
 /**
  * The CEO's permanent system prompt — the soul of the chief-of-staff voice.
@@ -71,6 +71,7 @@ export class CeoDO implements DurableObject {
       systemPrompt,
       userMessage: body.message,
       apiKey: this.env.ANTHROPIC_API_KEY,
+      waitUntil: getStateWaitUntil(this.state),
     });
 
     const headers = new Headers(resp.headers);

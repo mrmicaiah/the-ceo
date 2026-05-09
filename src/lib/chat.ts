@@ -1,19 +1,21 @@
 // Shared chat-turn primitive. Every chat endpoint funnels through here.
 //
 // Flow per turn:
-//   1. Auto-create the chat row if chatId is unknown.
-//   2. Persist the user message.
-//   3. Load full history (ASC), drop system rows — system goes in the API
-//      call's `system` field, not the messages array.
-//   4. Stream from Claude. Tee the byte stream: one half to the client, one
-//      half consumed in the background to accumulate text for persistence.
-//   5. After the stream completes, persist the assistant message.
+//   1. Load existing history (empty if chat is new).
+//   2. Build the messages array in memory: history + the new user message.
+//   3. Call Claude.
+//   4. If Claude failed pre-flight, return an error SSE response. No DB changes —
+//      the DB looks as if the turn never happened.
+//   5. If Claude succeeded, persist the chat row (if new) AND the user message
+//      in a single batch, then return a streaming Response. Background task
+//      accumulates the assistant text and persists it after the stream ends.
 //
-// v0 caveat: assistant-message persistence runs as a fire-and-forget background
-// task. If the client disconnects mid-stream and the DO suspends before the
-// task finishes, the assistant turn may not be saved. Acceptable for v0;
-// revisit with state.waitUntil or an in-band persistence transform if it
-// proves flaky in practice.
+// The user message is only written after Claude commits to a successful
+// streaming response, so failed turns leave no orphan rows.
+//
+// Background assistant-message persistence is pinned via opts.waitUntil when
+// callers (Durable Objects) supply one — that keeps the work alive past
+// client disconnect mid-stream.
 
 import { callClaude, parseTextEvents, ClaudeMessage } from "./claude";
 
@@ -27,6 +29,11 @@ export interface ChatTurnOpts {
   projectId?: string;
   employeeId?: string;
   taskBrief?: string;
+  // Optional waitUntil (from a DurableObjectState) — when provided, the
+  // assistant-message persistence is pinned to the DO's lifecycle so it
+  // survives mid-stream client disconnects. Without it, persistence is
+  // best-effort fire-and-forget.
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 const SSE_HEADERS: HeadersInit = {
@@ -38,41 +45,41 @@ const SSE_HEADERS: HeadersInit = {
 export async function handleChatTurn(opts: ChatTurnOpts): Promise<Response> {
   const { db, chatId, systemPrompt, userMessage, apiKey } = opts;
 
-  // 1. Ensure chat row exists.
-  const existing = await db.prepare("SELECT id FROM chats WHERE id = ?").bind(chatId).first();
-  if (!existing) {
-    await db
-      .prepare("INSERT INTO chats (id, project_id, employee_id, task_brief) VALUES (?, ?, ?, ?)")
-      .bind(chatId, opts.projectId ?? null, opts.employeeId ?? null, opts.taskBrief ?? "")
-      .run();
-  }
-
-  // 2. Persist user message.
-  await db
-    .prepare("INSERT INTO messages (id, chat_id, role, content) VALUES (?, ?, 'user', ?)")
-    .bind(crypto.randomUUID(), chatId, userMessage)
-    .run();
-
-  // 3. Load full history. Drop system rows; Claude takes the system prompt separately.
-  //    Tiebreak by id when created_at collides (default datetime('now') is per-second).
-  const { results } = await db
+  // 1. Load existing history. Tiebreak by id when created_at collides
+  //    (default datetime('now') is per-second). Empty if chat is new.
+  const { results: historyRows } = await db
     .prepare("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at ASC, id ASC")
     .bind(chatId)
     .all<{ role: string; content: string }>();
 
-  const messages: ClaudeMessage[] = results
+  const history: ClaudeMessage[] = historyRows
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-  // 4. Stream from Claude.
+  // 2. Build messages in memory — DB stays untouched until Claude commits.
+  const messages: ClaudeMessage[] = [...history, { role: "user", content: userMessage }];
+
+  // 3. Call Claude.
   const result = await callClaude({ apiKey, system: systemPrompt, messages, stream: true });
   if (!result.ok) return errorSseResponse(result.message);
   if (!("stream" in result)) return errorSseResponse("Streaming requested but no stream returned.");
 
+  // 4. Claude is good — persist the chat row (if new) and user message in one
+  //    transaction. The chat insert must come first because messages.chat_id
+  //    has a FK to chats(id) and D1 enforces FKs.
+  await db.batch([
+    db
+      .prepare("INSERT OR IGNORE INTO chats (id, project_id, employee_id, task_brief) VALUES (?, ?, ?, ?)")
+      .bind(chatId, opts.projectId ?? null, opts.employeeId ?? null, opts.taskBrief ?? ""),
+    db
+      .prepare("INSERT INTO messages (id, chat_id, role, content) VALUES (?, ?, 'user', ?)")
+      .bind(crypto.randomUUID(), chatId, userMessage),
+  ]);
+
   // 5. Tee — forward one half to client, drain the other for persistence.
   const [forClient, forAccum] = result.stream.tee();
 
-  void (async () => {
+  const persistAssistant = (async () => {
     let full = "";
     try {
       for await (const delta of parseTextEvents(forAccum)) full += delta;
@@ -86,12 +93,28 @@ export async function handleChatTurn(opts: ChatTurnOpts): Promise<Response> {
           .bind(crypto.randomUUID(), chatId, full)
           .run();
       } catch {
-        // Silent — v0 best-effort.
+        // Silent — best-effort.
       }
     }
   })();
 
+  // Pin to DO lifecycle if available; otherwise fire-and-forget.
+  if (opts.waitUntil) opts.waitUntil(persistAssistant);
+  else void persistAssistant;
+
   return new Response(forClient, { headers: SSE_HEADERS });
+}
+
+/**
+ * Pull a waitUntil function off a DurableObjectState if the runtime exposes
+ * one. Different @cloudflare/workers-types versions disagree on whether this
+ * is in the public type, so we feature-detect at runtime and stay narrow.
+ */
+export function getStateWaitUntil(
+  state: DurableObjectState,
+): ((p: Promise<unknown>) => void) | undefined {
+  const wu = (state as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil;
+  return typeof wu === "function" ? wu.bind(state) : undefined;
 }
 
 function errorSseResponse(message: string): Response {

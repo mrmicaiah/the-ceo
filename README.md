@@ -35,6 +35,12 @@ Full details in [`docs/architecture.md`](docs/architecture.md).
 
 v0 in progress. See [`docs/v0-scope.md`](docs/v0-scope.md) for what's being built first.
 
+## Local development
+
+Run `npm install`, drop your Anthropic key in `.dev.vars` as `ANTHROPIC_API_KEY=sk-ant-…`, then `npm run dev`.
+
+Note: `.dev.vars` must be plain UTF-8 with no BOM. PowerShell's default encodings often add a BOM or write UTF-16 — verify with `file .dev.vars` (expect `ASCII text`) or `head -c 3 .dev.vars | xxd` (expect the first byte to be `41` for `A`, not `ef bb bf` or `ff fe`).
+
 ## Documents
 
 - [`docs/vision.md`](docs/vision.md) — Why this exists, the soul of the product

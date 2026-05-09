@@ -1,5 +1,5 @@
 import { Env, EmployeeId, Employee } from "../types";
-import { handleChatTurn } from "../lib/chat";
+import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
 
 /** Character sheets — the permanent foundation of each employee's system prompt */
 const CHARACTER_SHEETS: Record<EmployeeId, { name: string; role: string; sheet: string }> = {
@@ -87,6 +87,7 @@ export class EmployeeDO implements DurableObject {
       userMessage: body.message,
       apiKey: this.env.ANTHROPIC_API_KEY,
       employeeId,
+      waitUntil: getStateWaitUntil(this.state),
     });
 
     // Echo the chat id so the client can reuse it for subsequent turns.
