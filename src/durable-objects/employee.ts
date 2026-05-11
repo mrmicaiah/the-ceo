@@ -127,6 +127,11 @@ export class EmployeeDO implements DurableObject {
         const lines: string[] = [];
         lines.push(`## You're cast on this project: ${project.name}`);
         lines.push("");
+        // Explicit, scannable, copy-pasteable. Tools that take a project_id
+        // (dispatch_claude_code today; others in the future) MUST use this
+        // literal UUID rather than inventing one.
+        lines.push(`Current project ID: ${projectId}`);
+        lines.push("");
         lines.push("Current briefing:");
         lines.push(`- Goal: ${project.goal || "(not set)"}`);
         lines.push(`- State: ${project.state || "(not set)"}`);

@@ -584,7 +584,14 @@ async function handleDispatchClaudeCode(
   )
     .bind(projectId)
     .first<{ id: string; name: string; cloneUrl: string | null }>();
-  if (!project) return json({ error: "project not found" }, 404);
+  if (!project) {
+    return json(
+      {
+        error: `No project found with id ${projectId}. Dex may have hallucinated the project ID — check that the project field in the dispatch block matches a real project in your portfolio.`,
+      },
+      404,
+    );
+  }
 
   const jobId = crypto.randomUUID();
   await env.DB.prepare(
