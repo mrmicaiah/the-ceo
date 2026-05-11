@@ -9,6 +9,7 @@ export interface Env {
   CEO_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
   EMPLOYEE_DO: DurableObjectNamespace;
+  AGENT_HUB_DO: DurableObjectNamespace;
   // Static-asset binding for the built /web frontend (Cloudflare Workers Assets).
   // Optional so the Worker still compiles when the binding hasn't been added yet
   // to a particular environment.
@@ -26,6 +27,10 @@ export interface Env {
   // Optional at the type level so the Worker can start without it; the
   // create-repo endpoint returns a structured 500 when missing.
   GITHUB_TOKEN?: string;
+  // Bearer token the local agent uses to authenticate its websocket upgrade
+  // against /api/agent/ws. Distinct from AUTH_TOKEN (which gates user-facing
+  // /api/* calls). Local: .dev.vars; prod: `npx wrangler secret put AGENT_TOKEN`.
+  AGENT_TOKEN?: string;
 }
 
 // ── Domain types (camelCase) ───────────────────────────────────────

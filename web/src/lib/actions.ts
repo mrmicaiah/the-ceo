@@ -1,39 +1,15 @@
-// Unified parser for every fenced action block the CEO emits.
+// Unified parser for every fenced action block the CEO and Dex emit.
 //
-// Format (per the CEO's system prompt):
-//   ```cast
-//   employee: nora | iris | theo | dex
-//   project: <project_id>
-//   task: <one line>
-//   reason: <one line>
-//   ```
+// Action languages and their shapes:
+//   - cast            (CEO)
+//   - create_project  (CEO)
+//   - rename_project  (CEO)
+//   - update_briefing (CEO)
+//   - create_repo     (CEO)
+//   - dispatch_claude_code (Dex)  — uses YAML pipe syntax for multi-line prompt
 //
-//   ```create_project
-//   name: <project name>
-//   initial_goal: <goal>
-//   reason: <user-facing reason>
-//   ```
-//
-//   ```rename_project
-//   project: <project_id>
-//   new_name: <new name>
-//   ```
-//
-//   ```update_briefing
-//   project: <project_id>
-//   field: goal | state | nextMove | why
-//   value: <new value>
-//   ```
-//
-//   ```create_repo
-//   project: <project_id, optional>
-//   name: <repo name>
-//   description: <one line>
-//   private: true | false
-//   ```
-//
-// Returns null on any malformed input. Callers (Message.tsx) fall back to
-// rendering the original text as a regular code block.
+// Returns null on any malformed input. Callers fall back to rendering the
+// original text as a regular code block.
 
 import type { EmployeeId } from "../types";
 
@@ -70,6 +46,12 @@ export type ParsedAction =
       name: string;
       description: string;
       isPrivate: boolean;
+    }
+  | {
+      type: "dispatch_claude_code";
+      project: string;
+      summary: string;
+      prompt: string;
     };
 
 export const ACTION_LANGS: ReadonlySet<string> = new Set([
@@ -78,6 +60,7 @@ export const ACTION_LANGS: ReadonlySet<string> = new Set([
   "rename_project",
   "update_briefing",
   "create_repo",
+  "dispatch_claude_code",
 ]);
 
 export function parseActionBlock(
@@ -96,6 +79,8 @@ export function parseActionBlock(
       return parseUpdateBriefing(fields);
     case "create_repo":
       return parseCreateRepo(fields);
+    case "dispatch_claude_code":
+      return parseDispatchClaudeCode(fields);
     default:
       return null;
   }
@@ -114,19 +99,81 @@ export function actionId(action: ParsedAction): string {
       return `update_briefing:${action.project}:${action.field}:${action.value}`;
     case "create_repo":
       return `create_repo:${action.project ?? "_"}:${action.name}`;
+    case "dispatch_claude_code":
+      return `dispatch_claude_code:${action.project}:${action.summary}`;
   }
 }
 
 // ── Internals ──────────────────────────────────────────────────────────
 
+/**
+ * Parse the fenced-block body into a flat dictionary of fields.
+ *
+ * Handles two forms per line:
+ *   - `key: value`              — single-line value, trimmed
+ *   - `key: |` then indented block — multi-line value (YAML pipe), strips
+ *     the common leading indent from each line in the block.
+ *
+ * The multi-line block terminates at the next unindented top-level key or
+ * end-of-input. Other action languages don't use the pipe form; they continue
+ * to work because they have no `|` values.
+ */
 function parseFields(content: string): Record<string, string> {
   const fields: Record<string, string> = {};
-  for (const line of content.split("\n")) {
-    const m = line.match(/^\s*([a-zA-Z_]+)\s*:\s*(.*)$/);
-    if (!m) continue;
-    const key = m[1].trim().toLowerCase();
-    const value = m[2].trim();
-    if (value.length) fields[key] = value;
+  const lines = content.split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
+    // Top-level keys start at column 0 — leading whitespace marks a
+    // continuation of a previous multi-line block (rare since we usually
+    // consume the block fully) or a stray indented line we skip.
+    const m = line.match(/^([a-zA-Z_]+)\s*:\s*(.*)$/);
+    if (!m) {
+      i++;
+      continue;
+    }
+    const key = m[1].toLowerCase();
+    const rawValue = m[2];
+
+    if (rawValue.trim() === "|") {
+      // Multi-line block follows.
+      i++;
+      const collected: string[] = [];
+      let baseIndent: number | null = null;
+      while (i < lines.length) {
+        const next = lines[i];
+        // Unindented top-level key terminates the block.
+        if (next.length > 0 && !/^\s/.test(next) && /^[a-zA-Z_]+\s*:/.test(next)) {
+          break;
+        }
+        if (next.trim() === "") {
+          collected.push("");
+          i++;
+          continue;
+        }
+        if (baseIndent === null) {
+          const im = next.match(/^(\s*)/);
+          baseIndent = im ? im[1].length : 0;
+        }
+        const im = next.match(/^(\s*)/);
+        const indent = im ? im[1].length : 0;
+        collected.push(next.slice(Math.min(indent, baseIndent ?? 0)));
+        i++;
+      }
+      // Trim leading and trailing blank lines.
+      while (collected.length > 0 && collected[0].trim() === "") collected.shift();
+      while (collected.length > 0 && collected[collected.length - 1].trim() === "") collected.pop();
+      if (collected.length > 0) fields[key] = collected.join("\n");
+    } else {
+      const value = rawValue.trim();
+      if (value.length > 0) fields[key] = value;
+      i++;
+    }
   }
   return fields;
 }
@@ -200,5 +247,15 @@ function parseCreateRepo(f: Record<string, string>): ParsedAction | null {
     name: f.name,
     description: f.description ?? "",
     isPrivate,
+  };
+}
+
+function parseDispatchClaudeCode(f: Record<string, string>): ParsedAction | null {
+  if (!f.project || !f.summary || !f.prompt) return null;
+  return {
+    type: "dispatch_claude_code",
+    project: f.project,
+    summary: f.summary,
+    prompt: f.prompt,
   };
 }

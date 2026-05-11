@@ -1,6 +1,6 @@
 import { Env, EmployeeId, Employee } from "../types";
 import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
-import { CHARACTER_SHEETS, COMPANY_KNOWLEDGE, isEmployeeId } from "../lib/employees";
+import { CHARACTER_SHEETS, COMPANY_KNOWLEDGE, DEX_TOOLS, isEmployeeId } from "../lib/employees";
 
 const RECENT_REPORTS_LIMIT = 5;
 
@@ -145,6 +145,36 @@ export class EmployeeDO implements DurableObject {
         } else {
           lines.push("You haven't filed any reports on this project yet.");
         }
+
+        // Dex-only: surface any Claude Code runs he dispatched that have
+        // completed since he last spoke. Mark them seen so they don't appear
+        // in the system prompt again on his next turn. This closes the
+        // dispatch → review loop entirely in conversation.
+        if (employeeId === "dex") {
+          const unseen = await this.loadAndMarkUnseenJobs(projectId);
+          if (unseen.length > 0) {
+            lines.push("");
+            lines.push("## Claude Code runs you haven't reviewed yet");
+            lines.push("");
+            lines.push(
+              "These ran since your last turn. Speak to them in voice; the user has seen them stream live, but you've just now received the results.",
+            );
+            for (const job of unseen) {
+              lines.push("");
+              lines.push(`- **${job.summary}** [${job.status}]`);
+              if (job.status === "completed") {
+                lines.push(`  - Worker summary: ${job.workerSummary || "(none)"}`);
+                lines.push(`  - Diff stat: ${job.diffStat || "(no changes)"}`);
+                if (job.diffTruncated) {
+                  lines.push("  - (Diff truncated for context — full diff is in the panel.)");
+                }
+              } else if (job.status === "failed") {
+                lines.push(`  - Failed in ${job.failureStage ?? "unknown"} stage: ${job.failureError ?? "no error message"}`);
+              }
+            }
+          }
+        }
+
         projectBlock = `\n\n${lines.join("\n")}`;
       }
     }
@@ -172,10 +202,101 @@ export class EmployeeDO implements DurableObject {
       ? `\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`
       : "";
 
-    // Order: shared company knowledge → individual voice → project context →
-    // assignment → private notes. Company knowledge is universal; the
-    // character sheet preserves the voice; everything else overlays.
-    return `${COMPANY_KNOWLEDGE}\n\n${character.sheet}${projectBlock}${taskBlock}${notesBlock}`;
+    // Dex-only: append DEX_TOOLS between character sheet and project context.
+    // Other employees never see this section — they don't have dispatch yet.
+    const toolsBlock = employeeId === "dex" ? `\n\n${DEX_TOOLS}` : "";
+
+    // Order: shared company knowledge → individual voice → (Dex's tools) →
+    // project context → assignment → private notes. Company knowledge is
+    // universal; the character sheet preserves the voice; tools are
+    // employee-specific; project/task context overlays.
+    return `${COMPANY_KNOWLEDGE}\n\n${character.sheet}${toolsBlock}${projectBlock}${taskBlock}${notesBlock}`;
+  }
+
+  /**
+   * Dex-only helper: return any execution_jobs on this project that have
+   * completed (or failed) since Dex last spoke (dex_seen_at IS NULL), and
+   * mark them seen in the same call so they don't appear twice.
+   *
+   * Idempotent across re-renders within the same turn — once marked, the
+   * row is no longer in the unseen set.
+   */
+  private async loadAndMarkUnseenJobs(projectId: string): Promise<
+    Array<{
+      jobId: string;
+      summary: string;
+      status: string;
+      workerSummary: string | null;
+      diffStat: string | null;
+      diffTruncated: boolean;
+      failureError: string | null;
+      failureStage: string | null;
+    }>
+  > {
+    const { results } = await this.env.DB.prepare(
+      `SELECT id AS jobId,
+              summary,
+              status,
+              diff_summary AS diffSummaryRaw
+       FROM execution_jobs
+       WHERE project_id = ?
+         AND status IN ('completed', 'failed')
+         AND dex_seen_at IS NULL
+       ORDER BY created_at ASC`,
+    )
+      .bind(projectId)
+      .all<{
+        jobId: string;
+        summary: string;
+        status: string;
+        diffSummaryRaw: string | null;
+      }>();
+
+    if (results.length === 0) return [];
+
+    const parsed = results.map((row) => {
+      let workerSummary: string | null = null;
+      let diffStat: string | null = null;
+      let diffTruncated = false;
+      let failureError: string | null = null;
+      let failureStage: string | null = null;
+      if (row.diffSummaryRaw) {
+        try {
+          const obj = JSON.parse(row.diffSummaryRaw) as Record<string, unknown>;
+          if (row.status === "completed") {
+            workerSummary = typeof obj.summary === "string" ? obj.summary : null;
+            diffStat = typeof obj.diffStat === "string" ? obj.diffStat : null;
+            diffTruncated = obj.diffTruncated === true;
+          } else {
+            failureError = typeof obj.error === "string" ? obj.error : null;
+            failureStage = typeof obj.stage === "string" ? obj.stage : null;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return {
+        jobId: row.jobId,
+        summary: row.summary,
+        status: row.status,
+        workerSummary,
+        diffStat,
+        diffTruncated,
+        failureError,
+        failureStage,
+      };
+    });
+
+    // Mark these jobs seen so we don't include them again on Dex's next turn.
+    const ids = parsed.map((j) => j.jobId);
+    const placeholders = ids.map(() => "?").join(", ");
+    await this.env.DB.prepare(
+      `UPDATE execution_jobs SET dex_seen_at = datetime('now') WHERE id IN (${placeholders})`,
+    )
+      .bind(...ids)
+      .run();
+
+    return parsed;
   }
 
   /** Get the employee's profile (character sheet + role) */

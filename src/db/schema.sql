@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS projects (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dormant', 'archived')),
   repo_path TEXT,
+  clone_url TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -78,14 +79,17 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
   project_id TEXT NOT NULL REFERENCES projects(id),
   chat_id TEXT NOT NULL REFERENCES chats(id),
   prompt TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
   output_stream TEXT,
   diff_summary TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  completed_at TEXT
+  completed_at TEXT,
+  dex_seen_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON execution_jobs(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_jobs_dex_unseen ON execution_jobs(project_id, status, dex_seen_at);
 
 -- ── Employee notes (private per-employee memory of the user) ───────
 

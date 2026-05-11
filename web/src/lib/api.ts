@@ -13,8 +13,13 @@ import type {
   Briefing,
   CastResult,
   ChatWithMessages,
+  DispatchResult,
   EmployeeId,
+  ExecutionJobSnapshot,
   ProjectListItem,
+  StreamCompletedEvent,
+  StreamFailedEvent,
+  StreamOutputEvent,
   WrapResult,
 } from "../types";
 
@@ -122,6 +127,109 @@ export async function createGithubRepo(input: {
     }),
   });
   return jsonOrThrow<CreatedRepo>(resp);
+}
+
+// ── Claude Code dispatch ─────────────────────────────────────────────
+
+/**
+ * POST /api/projects/:id/dispatch-claude-code — creates a job row and asks
+ * AgentHub to send it to the local agent (or queues it if the agent is
+ * offline). Returns the jobId so the frontend can subscribe to its stream.
+ */
+export async function dispatchClaudeCode(input: {
+  projectId: string;
+  chatId: string;
+  summary: string;
+  prompt: string;
+}): Promise<DispatchResult> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(input.projectId)}/dispatch-claude-code`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        chatId: input.chatId,
+        summary: input.summary,
+        prompt: input.prompt,
+      }),
+    },
+  );
+  return jsonOrThrow<DispatchResult>(resp);
+}
+
+/** GET /api/jobs/:id — full persisted snapshot of a job. */
+export async function getJob(jobId: string): Promise<ExecutionJobSnapshot | null> {
+  const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    headers: headers(),
+  });
+  if (resp.status === 404) return null;
+  return jsonOrThrow<ExecutionJobSnapshot>(resp);
+}
+
+/**
+ * Open a Server-Sent-Events stream for a job. Returns a cleanup function
+ * that closes the underlying fetch reader.
+ *
+ * Note: native EventSource doesn't support custom headers, so we use fetch
+ * with manual SSE parsing — same pattern as streamChat() above.
+ */
+export interface JobStreamHandlers {
+  onOutput: (event: StreamOutputEvent) => void;
+  onCompleted: (event: StreamCompletedEvent) => void;
+  onFailed: (event: StreamFailedEvent) => void;
+  onError?: (message: string) => void;
+  onSubscribed?: () => void;
+  onClose?: () => void;
+}
+
+export function openJobStream(jobId: string, h: JobStreamHandlers): () => void {
+  const ctrl = new AbortController();
+  (async () => {
+    try {
+      const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/stream`, {
+        headers: headers(),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        h.onError?.(`stream open failed: ${resp.status}`);
+        return;
+      }
+      const reader = resp.body?.getReader();
+      if (!reader) {
+        h.onError?.("no stream body");
+        return;
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) >= 0) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const ev = parseSseEvent(raw);
+          if (!ev) continue;
+          if (ev.type === "subscribed") {
+            h.onSubscribed?.();
+          } else if (ev.type === "output") {
+            h.onOutput(ev.data as StreamOutputEvent);
+          } else if (ev.type === "completed") {
+            h.onCompleted(ev.data as StreamCompletedEvent);
+          } else if (ev.type === "failed") {
+            h.onFailed(ev.data as StreamFailedEvent);
+          }
+        }
+      }
+      h.onClose?.();
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        h.onError?.((err as Error).message);
+      }
+    }
+  })();
+  return () => ctrl.abort();
 }
 
 // ── Briefing ─────────────────────────────────────────────────────────
@@ -280,7 +388,8 @@ async function streamChat(
 
 interface ParsedSseEvent {
   type: string;
-  data: { delta?: string; message?: string } | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any;
 }
 
 function parseSseEvent(raw: string): ParsedSseEvent | null {

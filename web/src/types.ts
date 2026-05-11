@@ -87,3 +87,58 @@ export interface CastResult {
   employee: EmployeeId;
   projectId: string;
 }
+
+// ── Claude Code execution ────────────────────────────────────────────
+
+export type JobStatus = "queued" | "running" | "completed" | "failed";
+
+export interface JobDiff {
+  summary?: string;
+  diffStat?: string;
+  diff?: string;
+  diffTruncated?: boolean;
+}
+
+export interface JobFailure {
+  error?: string;
+  stage?: "workspace" | "execution" | "diff";
+}
+
+export interface ExecutionJobSnapshot {
+  id: string;
+  projectId: string;
+  chatId: string;
+  summary: string;
+  prompt: string;
+  status: JobStatus;
+  outputStream: string;
+  diff: JobDiff | null;
+  failure: JobFailure | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface DispatchResult {
+  jobId: string;
+  status: string;
+  projectId: string;
+}
+
+export type StreamOutputKind = "text" | "tool_use" | "tool_result";
+
+export interface StreamOutputEvent {
+  kind: StreamOutputKind;
+  payload: string;
+}
+
+export interface StreamCompletedEvent {
+  summary: string;
+  diffStat: string;
+  diff: string;
+  diffTruncated: boolean;
+}
+
+export interface StreamFailedEvent {
+  error: string;
+  stage: "workspace" | "execution" | "diff";
+}

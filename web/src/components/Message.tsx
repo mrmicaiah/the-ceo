@@ -10,6 +10,7 @@ import remarkGfm from "remark-gfm";
 import { CastSuggestion } from "./CastSuggestion";
 import { CreateProjectSuggestion } from "./CreateProjectSuggestion";
 import { CreateRepoSuggestion } from "./CreateRepoSuggestion";
+import { DispatchClaudeCodeSuggestion } from "./DispatchClaudeCodeSuggestion";
 import { RenameNote } from "./RenameNote";
 import { BriefingUpdateNote } from "./BriefingUpdateNote";
 import { ACTION_LANGS, parseActionBlock, type ParsedAction } from "../lib/actions";
@@ -231,6 +232,15 @@ function ActionRenderer({
           description={action.description}
           isPrivate={action.isPrivate}
           project={action.project}
+        />
+      );
+    case "dispatch_claude_code":
+      return (
+        <DispatchClaudeCodeSuggestion
+          project={action.project}
+          summary={action.summary}
+          prompt={action.prompt}
+          sourceChatId={sourceChatId}
         />
       );
   }

@@ -23,9 +23,14 @@ bindings = [
   { name = "CEO_DO", class_name = "CeoDO" },
   { name = "PROJECT_DO", class_name = "ProjectDO" },
   { name = "EMPLOYEE_DO", class_name = "EmployeeDO" },
+  { name = "AGENT_HUB_DO", class_name = "AgentHubDO" },
 ]
 
 # Migrations for Durable Object storage
 [[migrations]]
 tag = "v1"
 new_classes = ["CeoDO", "ProjectDO", "EmployeeDO"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["AgentHubDO"]

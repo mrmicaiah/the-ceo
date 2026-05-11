@@ -8,6 +8,7 @@ import { createRepo } from "./lib/github";
 export { CeoDO } from "./durable-objects/ceo";
 export { ProjectDO } from "./durable-objects/project";
 export { EmployeeDO } from "./durable-objects/employee";
+export { AgentHubDO } from "./durable-objects/agent-hub";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -22,7 +23,9 @@ export default {
     // ── Auth gate for /api/* ────────────────────────────────────────
     // /health is open above; SPA asset requests fall through to ASSETS
     // at the bottom of this handler and bypass this check naturally.
-    if (path.startsWith("/api/")) {
+    // /api/agent/ws has its own auth (AGENT_TOKEN, not AUTH_TOKEN) handled
+    // in the upgrade branch below, so we exempt it here.
+    if (path.startsWith("/api/") && path !== "/api/agent/ws") {
       const unauth = assertAuthorized(request, env);
       if (unauth) return unauth;
     }
@@ -110,6 +113,13 @@ export default {
       return handleCast(env, castMatch[1], request);
     }
 
+    // ── Dispatch Claude Code: POST /api/projects/:id/dispatch-claude-code
+    // Same reasoning — must come before the with-subpath forwarder.
+    const dispatchMatch = path.match(/^\/api\/projects\/([^/]+)\/dispatch-claude-code$/);
+    if (dispatchMatch && request.method === "POST") {
+      return handleDispatchClaudeCode(env, dispatchMatch[1], request);
+    }
+
     // ── Single project GET / PATCH (bare /api/projects/:id) ────────
     const projectIdMatch = path.match(/^\/api\/projects\/([^/]+)$/);
     if (projectIdMatch && request.method === "GET") {
@@ -181,6 +191,18 @@ export default {
       return handleWrapChat(env, wrapMatch[1]);
     }
 
+    // ── Job snapshot: GET /api/jobs/:id ─────────────────────────────
+    const jobIdMatch = path.match(/^\/api\/jobs\/([^/]+)$/);
+    if (jobIdMatch && request.method === "GET") {
+      return handleGetJob(env, jobIdMatch[1]);
+    }
+
+    // ── Job live stream: GET /api/jobs/:id/stream (SSE) ─────────────
+    const jobStreamMatch = path.match(/^\/api\/jobs\/([^/]+)\/stream$/);
+    if (jobStreamMatch && request.method === "GET") {
+      return handleJobStream(env, jobStreamMatch[1]);
+    }
+
     // ── Get chat metadata + messages: GET /api/chats/:chatId ────────
     const chatMatch = path.match(/^\/api\/chats\/([^/]+)$/);
     if (chatMatch && request.method === "GET") {
@@ -214,9 +236,28 @@ export default {
     }
 
     // ── Agent websocket (for local agent connection) ────────────────
+    // Worker-level auth: validate Bearer AGENT_TOKEN BEFORE forwarding the
+    // upgrade to AgentHub. This keeps the DO single-purpose: it just owns
+    // the socket and the routing, not the bouncer logic.
     if (path === "/api/agent/ws") {
-      // TODO: upgrade to websocket, handle execution job dispatch/results
-      return new Response("WebSocket upgrade not yet implemented", { status: 501 });
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("expected websocket upgrade", { status: 426 });
+      }
+      if (!env.AGENT_TOKEN) {
+        return new Response("AGENT_TOKEN not configured on server", { status: 500 });
+      }
+      const auth = request.headers.get("Authorization") ?? "";
+      const m = auth.match(/^Bearer\s+(.+)$/);
+      if (!m || m[1] !== env.AGENT_TOKEN) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      const stub = env.AGENT_HUB_DO.get(env.AGENT_HUB_DO.idFromName("singleton"));
+      return stub.fetch(
+        new Request("http://do/connect", {
+          method: request.method,
+          headers: request.headers,
+        }),
+      );
     }
 
     // ── Static frontend (served by Cloudflare Workers Assets) ───────
@@ -483,15 +524,19 @@ async function handleCreateRepo(env: Env, request: Request): Promise<Response> {
     return json({ error: result.message, githubStatus: result.status }, status);
   }
 
-  // Attach to project if requested.
+  // Attach to project if requested. repo_path stores the html URL for
+  // human-readable display; clone_url stores the .git-suffixed HTTPS URL so
+  // the agent can `git clone` without further transformation.
   const projectId = body.projectId?.trim();
   if (projectId) {
     const exists = await env.DB.prepare("SELECT id FROM projects WHERE id = ?")
       .bind(projectId)
       .first();
     if (exists) {
-      await env.DB.prepare("UPDATE projects SET repo_path = ? WHERE id = ?")
-        .bind(result.htmlUrl, projectId)
+      await env.DB.prepare(
+        "UPDATE projects SET repo_path = ?, clone_url = ? WHERE id = ?",
+      )
+        .bind(result.htmlUrl, result.cloneUrl, projectId)
         .run();
     }
   }
@@ -505,6 +550,172 @@ async function handleCreateRepo(env: Env, request: Request): Promise<Response> {
     },
     201,
   );
+}
+
+/**
+ * POST /api/projects/:projectId/dispatch-claude-code
+ *
+ * Persists a job row (status='queued'), then asks AgentHub to dispatch it.
+ * AgentHub flips the row to 'running' once it has sent the job over the
+ * websocket; if no agent is connected, the row stays 'queued' until the
+ * next agent 'ready' message.
+ *
+ * Body: { summary: string, prompt: string, chatId: string }. summary is the
+ * user-facing label; prompt is the full Claude Code instruction; chatId
+ * threads the job to Dex's conversation so his next turn sees the result.
+ */
+async function handleDispatchClaudeCode(
+  env: Env,
+  projectId: string,
+  request: Request,
+): Promise<Response> {
+  const body = (await request.json().catch(() => null)) as
+    | { summary?: string; prompt?: string; chatId?: string }
+    | null;
+  if (!body || typeof body.summary !== "string" || typeof body.prompt !== "string" || typeof body.chatId !== "string") {
+    return json({ error: "missing summary, prompt, or chatId" }, 400);
+  }
+  if (!body.summary.trim() || !body.prompt.trim() || !body.chatId.trim()) {
+    return json({ error: "summary, prompt, and chatId must be non-empty" }, 400);
+  }
+
+  const project = await env.DB.prepare(
+    `SELECT id, name, clone_url AS cloneUrl FROM projects WHERE id = ?`,
+  )
+    .bind(projectId)
+    .first<{ id: string; name: string; cloneUrl: string | null }>();
+  if (!project) return json({ error: "project not found" }, 404);
+
+  const jobId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO execution_jobs (id, project_id, chat_id, prompt, summary, status)
+     VALUES (?, ?, ?, ?, ?, 'queued')`,
+  )
+    .bind(jobId, projectId, body.chatId.trim(), body.prompt.trim(), body.summary.trim())
+    .run();
+
+  // Ask AgentHub to dispatch. If no agent is connected, AgentHub returns
+  // { status: "queued" } and the row stays queued.
+  const stub = env.AGENT_HUB_DO.get(env.AGENT_HUB_DO.idFromName("singleton"));
+  const dispatchResp = await stub.fetch(
+    new Request("http://do/dispatch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId,
+        repoName: deriveRepoName(project.cloneUrl, project.name),
+        cloneUrl: project.cloneUrl,
+        prompt: body.prompt.trim(),
+        projectId,
+        chatId: body.chatId.trim(),
+      }),
+    }),
+  );
+  const dispatchResult = (await dispatchResp.json().catch(() => ({}))) as {
+    status?: string;
+  };
+
+  return json(
+    {
+      jobId,
+      status: dispatchResult.status ?? "queued",
+      projectId,
+    },
+    201,
+  );
+}
+
+/** GET /api/jobs/:id — returns the current persisted snapshot. */
+async function handleGetJob(env: Env, jobId: string): Promise<Response> {
+  const row = await env.DB.prepare(
+    `SELECT id,
+            project_id AS projectId,
+            chat_id AS chatId,
+            prompt,
+            summary,
+            status,
+            output_stream AS outputStream,
+            diff_summary AS diffSummaryRaw,
+            created_at AS createdAt,
+            completed_at AS completedAt
+     FROM execution_jobs WHERE id = ?`,
+  )
+    .bind(jobId)
+    .first<{
+      id: string;
+      projectId: string;
+      chatId: string;
+      prompt: string;
+      summary: string;
+      status: string;
+      outputStream: string | null;
+      diffSummaryRaw: string | null;
+      createdAt: string;
+      completedAt: string | null;
+    }>();
+  if (!row) return json({ error: "job not found" }, 404);
+
+  // diff_summary is stored as JSON of {summary, diffStat, diff, diffTruncated}
+  // for completed jobs OR {error, stage} for failed jobs. Parse defensively.
+  let diff: {
+    summary?: string;
+    diffStat?: string;
+    diff?: string;
+    diffTruncated?: boolean;
+  } | null = null;
+  let failure: { error?: string; stage?: string } | null = null;
+  if (row.diffSummaryRaw) {
+    try {
+      const parsed = JSON.parse(row.diffSummaryRaw) as Record<string, unknown>;
+      if (row.status === "failed") {
+        failure = parsed as { error?: string; stage?: string };
+      } else {
+        diff = parsed as {
+          summary?: string;
+          diffStat?: string;
+          diff?: string;
+          diffTruncated?: boolean;
+        };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return json({
+    id: row.id,
+    projectId: row.projectId,
+    chatId: row.chatId,
+    summary: row.summary,
+    prompt: row.prompt,
+    status: row.status,
+    outputStream: row.outputStream ?? "",
+    diff,
+    failure,
+    createdAt: row.createdAt,
+    completedAt: row.completedAt,
+  });
+}
+
+/** GET /api/jobs/:id/stream — SSE proxy to AgentHub's subscriber fan-out. */
+async function handleJobStream(env: Env, jobId: string): Promise<Response> {
+  const stub = env.AGENT_HUB_DO.get(env.AGENT_HUB_DO.idFromName("singleton"));
+  return stub.fetch(
+    new Request(`http://do/subscribe/${encodeURIComponent(jobId)}`, { method: "GET" }),
+  );
+}
+
+/**
+ * Derive the directory name for the local checkout from the clone URL.
+ * Mirrors AgentHub's helper — kept duplicated here rather than crossing the
+ * DO boundary for a one-line utility.
+ */
+function deriveRepoName(cloneUrl: string | null, projectName: string): string {
+  if (cloneUrl) {
+    const m = cloneUrl.match(/\/([^/]+?)(?:\.git)?$/);
+    if (m?.[1]) return m[1];
+  }
+  return projectName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 /**
