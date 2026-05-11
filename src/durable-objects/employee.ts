@@ -1,6 +1,6 @@
 import { Env, EmployeeId, Employee } from "../types";
 import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
-import { CHARACTER_SHEETS, isEmployeeId } from "../lib/employees";
+import { CHARACTER_SHEETS, COMPANY_KNOWLEDGE, isEmployeeId } from "../lib/employees";
 
 const RECENT_REPORTS_LIMIT = 5;
 
@@ -172,7 +172,10 @@ export class EmployeeDO implements DurableObject {
       ? `\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`
       : "";
 
-    return `${character.sheet}${projectBlock}${taskBlock}${notesBlock}`;
+    // Order: shared company knowledge → individual voice → project context →
+    // assignment → private notes. Company knowledge is universal; the
+    // character sheet preserves the voice; everything else overlays.
+    return `${COMPANY_KNOWLEDGE}\n\n${character.sheet}${projectBlock}${taskBlock}${notesBlock}`;
   }
 
   /** Get the employee's profile (character sheet + role) */

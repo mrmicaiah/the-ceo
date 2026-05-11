@@ -1,6 +1,10 @@
 // Small affordance to wrap an employee+project chat. Triggers the report
 // flow on the server; on success, hands back the updated briefing so the
 // right rail can animate to the new state.
+//
+// Always-visible explanatory note above the button (when employee + project
+// context is known) so the user knows what wrapping does before clicking:
+// reports flow up to the project briefing for the named project.
 
 import { useState } from "react";
 import { wrapChat } from "../lib/api";
@@ -8,10 +12,12 @@ import type { Briefing } from "../types";
 
 interface Props {
   chatId: string;
+  employeeName: string | null;
+  projectName: string | null;
   onWrapped: (newBriefing: Briefing | null) => void;
 }
 
-export function WrapChatButton({ chatId, onWrapped }: Props) {
+export function WrapChatButton({ chatId, employeeName, projectName, onWrapped }: Props) {
   const [state, setState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -42,17 +48,26 @@ export function WrapChatButton({ chatId, onWrapped }: Props) {
     );
   }
 
+  const showNote = !!employeeName && !!projectName;
+
   return (
-    <div className="flex items-center gap-3">
-      {errorMsg && (
-        <span className="text-[12px] text-muted">{errorMsg}</span>
+    <div className="flex flex-col items-end gap-1.5">
+      {showNote && (
+        <div className="text-[11px] text-muted max-w-[280px] text-right leading-snug">
+          Wrapping files a report from {employeeName} to your briefing for &ldquo;{projectName}&rdquo;.
+        </div>
       )}
-      <button
-        onClick={onClick}
-        className="text-[13px] text-muted hover:text-ink transition-colors"
-      >
-        Wrap this chat
-      </button>
+      <div className="flex items-center gap-3">
+        {errorMsg && (
+          <span className="text-[12px] text-muted">{errorMsg}</span>
+        )}
+        <button
+          onClick={onClick}
+          className="text-[13px] text-muted hover:text-ink transition-colors"
+        >
+          Wrap this chat
+        </button>
+      </div>
     </div>
   );
 }

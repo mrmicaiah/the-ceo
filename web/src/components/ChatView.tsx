@@ -17,7 +17,7 @@ type Props =
   | { kind: "employee"; chatId: string; projectId: string };
 
 export function ChatView(props: Props) {
-  const { setBriefing, refreshProjects } = useStore();
+  const { state: storeState, setBriefing, refreshProjects } = useStore();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streamingAssistant, setStreamingAssistant] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState<EmployeeId | null>(null);
@@ -164,6 +164,12 @@ export function ChatView(props: Props) {
 
   // Heading text for the chat. For project chats, show the project + employee.
   const employeeName = employeeId ? CHARACTER_NAMES[employeeId] : null;
+  // Project name for the wrap-chat note. Looked up from the rail's projects
+  // list so we don't have to re-fetch on every chat view mount.
+  const projectName =
+    props.kind === "employee"
+      ? storeState.projects.find((p) => p.id === props.projectId)?.name ?? null
+      : null;
 
   return (
     <div className="h-full flex flex-col">
@@ -177,6 +183,8 @@ export function ChatView(props: Props) {
           {!chatWrapped && messages.length > 0 && (
             <WrapChatButton
               chatId={props.chatId}
+              employeeName={employeeName}
+              projectName={projectName}
               onWrapped={(briefing) => {
                 setChatWrapped(true);
                 if (briefing && props.kind === "employee") {

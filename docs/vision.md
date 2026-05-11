@@ -12,9 +12,9 @@ The difference between managers and workers is simple: **managers spawn, workers
 
 ## They work with you
 
-This is the line that separates The CEO from agent swarms and AutoGPT-style products. Every node in the tree is a chat **you sit in.** The hierarchy isn't there to remove you from the work. It's there to **route your attention** — to make sure that when you sit down to do something, you're in the right conversation with the right context already loaded.
+This is the line that separates The CEO from agent swarms and AutoGPT-style products. It's not that the staff can't operate without you in the room — they can think, research, draft, confer, prepare. The line is sharper than that: **only you change state.** No employee edits a file. No employee renames a project. No employee commits code. They produce; you decide; you click.
 
-The CEO is a context router for your own attention.
+The CEO is the narrow exception. As your chief of staff, it has delegated authority for a small set of routine actions — adding a project to its books, renaming one, updating a briefing, proposing a repo. The load-bearing ones still wait for your click. Everything else routes through you. The hierarchy isn't there to remove you from the work; it's there to **route your attention** and **gate execution.** The CEO is a context router for your attention. You remain the executor.
 
 ## The CEO
 
