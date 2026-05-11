@@ -4,6 +4,9 @@
 // and returns a parsed JSON payload (or null on failure). Callers handle the
 // null case by keeping the existing state — failures degrade gracefully
 // rather than corrupting the briefing or ping log.
+//
+// Field naming is camelCase throughout (matches the public API surface). DB
+// columns remain snake_case and are mapped at the SQL boundary.
 
 import { callClaude, ClaudeMessage } from "./claude";
 import { extractJsonObject } from "./json";
@@ -14,18 +17,18 @@ import { Signal, EmployeeId } from "../types";
 export interface BriefingShape {
   goal: string;
   state: string;
-  next_move: string;
+  nextMove: string;
   why: string;
 }
 
 export interface ReportShape {
-  from_employee: EmployeeId;
-  parent_node_id?: string | null;
-  asked_to_do: string;
-  what_happened: string;
+  fromEmployee: EmployeeId;
+  parentNodeId?: string | null;
+  askedToDo: string;
+  whatHappened: string;
   artifact?: string | null;
-  open_questions?: string | null;
-  recommended_next_move: string;
+  openQuestions?: string | null;
+  recommendedNextMove: string;
 }
 
 export interface PingShape {
@@ -55,16 +58,16 @@ export async function updateBriefingFromReport(
 ): Promise<BriefingShape | null> {
   const system =
     "You maintain a project briefing. Given the current briefing and a new report, " +
-    "return an updated briefing as JSON with fields {goal, state, next_move, why}. " +
+    "return an updated briefing as JSON with fields {goal, state, nextMove, why}. " +
     "Only change what the report actually warrants. Don't redesign the goal unless " +
     "the report explicitly redirects the project. State should reflect what's actually " +
-    "true now. Next_move should be the most useful next concrete action. Why should " +
+    "true now. NextMove should be the most useful next concrete action. Why should " +
     "explain how that next move serves the goal. Return ONLY the JSON object — no " +
     "preamble, no fence, no commentary.";
 
   const userMsg =
     `CURRENT BRIEFING:\n${JSON.stringify(current, null, 2)}\n\n` +
-    `NEW REPORT (from ${report.from_employee}):\n${JSON.stringify(report, null, 2)}\n\n` +
+    `NEW REPORT (from ${report.fromEmployee}):\n${JSON.stringify(report, null, 2)}\n\n` +
     `Return the updated briefing as JSON.`;
 
   const result = await callClaude({
@@ -85,7 +88,7 @@ export async function updateBriefingFromReport(
   return {
     goal: typeof parsed.goal === "string" ? parsed.goal : current.goal,
     state: typeof parsed.state === "string" ? parsed.state : current.state,
-    next_move: typeof parsed.next_move === "string" ? parsed.next_move : current.next_move,
+    nextMove: typeof parsed.nextMove === "string" ? parsed.nextMove : current.nextMove,
     why: typeof parsed.why === "string" ? parsed.why : current.why,
   };
 }
@@ -129,10 +132,10 @@ export async function summarizeReportAsPing(
 // ── Pattern-notes maybe-update ─────────────────────────────────────────────
 
 export interface PingForContext {
-  project_name: string;
+  projectName: string;
   summary: string;
   signal: string;
-  created_at?: string;
+  createdAt?: string;
 }
 
 /**
@@ -159,14 +162,14 @@ export async function maybeUpdatePatternNotes(
 
   const recentBlock = recentPings.length
     ? recentPings
-        .map((p) => `- [${p.created_at ?? ""}] ${p.project_name}: ${p.summary} [${p.signal}]`)
+        .map((p) => `- [${p.createdAt ?? ""}] ${p.projectName}: ${p.summary} [${p.signal}]`)
         .join("\n")
     : "(none)";
 
   const userMsg =
     `CURRENT PATTERN NOTES:\n${currentNotes.trim() || "(none yet)"}\n\n` +
     `RECENT PINGS (most recent first):\n${recentBlock}\n\n` +
-    `NEW PING:\n${newPing.project_name}: ${newPing.summary} [${newPing.signal}]\n\n` +
+    `NEW PING:\n${newPing.projectName}: ${newPing.summary} [${newPing.signal}]\n\n` +
     `Return the JSON.`;
 
   const result = await callClaude({
@@ -187,11 +190,11 @@ export async function maybeUpdatePatternNotes(
 
 // ── Report generation from chat history ────────────────────────────────────
 
-export type ReportFromChat = Omit<ReportShape, "from_employee">;
+export type ReportFromChat = Omit<ReportShape, "fromEmployee">;
 
 /**
  * Ask the employee (in their voice) to file a report on the chat that just
- * happened. Returns the report body without `from_employee` — caller fills
+ * happened. Returns the report body without `fromEmployee` — caller fills
  * that in from the chat row.
  *
  * Edge cases:
@@ -213,11 +216,11 @@ export async function generateReportFromChat(
     "is the entire context. Be honest and concise — describe what actually got done. " +
     "Output ONLY a JSON object matching this shape:\n" +
     "{\n" +
-    '  "asked_to_do": string,            // what you were assigned at the start\n' +
-    '  "what_happened": string,          // what actually got done in the chat\n' +
-    '  "artifact": string | null,        // the deliverable (a draft, a prompt, a decision); null if none\n' +
-    '  "open_questions": string | null,  // anything unresolved; null if none\n' +
-    '  "recommended_next_move": string   // what should happen next on this project\n' +
+    '  "askedToDo": string,             // what you were assigned at the start\n' +
+    '  "whatHappened": string,          // what actually got done in the chat\n' +
+    '  "artifact": string | null,       // the deliverable (a draft, a prompt, a decision); null if none\n' +
+    '  "openQuestions": string | null,  // anything unresolved; null if none\n' +
+    '  "recommendedNextMove": string    // what should happen next on this project\n' +
     "}\n" +
     "No preamble, no fence, no commentary. Just the JSON object.";
 
@@ -249,25 +252,25 @@ export async function generateReportFromChat(
   if (!result.ok || !("text" in result)) return null;
 
   const parsed = extractJsonObject<{
-    asked_to_do?: string;
-    what_happened?: string;
+    askedToDo?: string;
+    whatHappened?: string;
     artifact?: string | null;
-    open_questions?: string | null;
-    recommended_next_move?: string;
+    openQuestions?: string | null;
+    recommendedNextMove?: string;
   }>(result.text);
   if (!parsed) return null;
   if (
-    typeof parsed.asked_to_do !== "string" ||
-    typeof parsed.what_happened !== "string" ||
-    typeof parsed.recommended_next_move !== "string"
+    typeof parsed.askedToDo !== "string" ||
+    typeof parsed.whatHappened !== "string" ||
+    typeof parsed.recommendedNextMove !== "string"
   ) {
     return null;
   }
   return {
-    asked_to_do: parsed.asked_to_do,
-    what_happened: parsed.what_happened,
+    askedToDo: parsed.askedToDo,
+    whatHappened: parsed.whatHappened,
     artifact: typeof parsed.artifact === "string" ? parsed.artifact : null,
-    open_questions: typeof parsed.open_questions === "string" ? parsed.open_questions : null,
-    recommended_next_move: parsed.recommended_next_move,
+    openQuestions: typeof parsed.openQuestions === "string" ? parsed.openQuestions : null,
+    recommendedNextMove: parsed.recommendedNextMove,
   };
 }

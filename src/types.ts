@@ -1,3 +1,7 @@
+// API/code-level types. CamelCase throughout — the public surface uses
+// camelCase. Snake_case appears only in raw SQL strings against the
+// `briefings`, `reports`, `status_pings`, `chats`, `messages`, etc. tables.
+
 // ── Env binding types ──────────────────────────────────────────────
 
 export interface Env {
@@ -5,29 +9,44 @@ export interface Env {
   CEO_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
   EMPLOYEE_DO: DurableObjectNamespace;
+  // Static-asset binding for the built /web frontend (Cloudflare Workers Assets).
+  // Optional so the Worker still compiles when the binding hasn't been added yet
+  // to a particular environment.
+  ASSETS?: Fetcher;
   // Secret — local: .dev.vars; prod: `npx wrangler secret put ANTHROPIC_API_KEY`
   ANTHROPIC_API_KEY: string;
+  // Bearer token required on all /api/* requests. /health and SPA asset
+  // requests are exempt. Local: .dev.vars; prod: `npx wrangler secret put AUTH_TOKEN`.
+  // The frontend reads VITE_AUTH_TOKEN at build time and sends it as
+  // `Authorization: Bearer <token>` — both values must match.
+  AUTH_TOKEN: string;
+  // GitHub Personal Access Token (classic or fine-grained with "repo" scope).
+  // Used by /api/github/create-repo to create repositories on the user's behalf.
+  // Local: .dev.vars; prod: `npx wrangler secret put GITHUB_TOKEN`.
+  // Optional at the type level so the Worker can start without it; the
+  // create-repo endpoint returns a structured 500 when missing.
+  GITHUB_TOKEN?: string;
 }
 
-// ── Domain types (from data-model.md) ──────────────────────────────
+// ── Domain types (camelCase) ───────────────────────────────────────
 
 export type ProjectStatus = "active" | "dormant" | "archived";
 
 export interface Project {
   id: string;
   name: string;
-  created_at: string;
+  createdAt: string;
   status: ProjectStatus;
   briefing: Briefing;
-  repo_path?: string;
+  repoPath?: string;
 }
 
 export interface Briefing {
   goal: string;
   state: string;
-  next_move: string;
+  nextMove: string;
   why: string;
-  updated_at: string;
+  updatedAt: string;
 }
 
 export type EmployeeId = "nora" | "iris" | "theo" | "dex";
@@ -36,72 +55,71 @@ export interface Employee {
   id: EmployeeId;
   name: string;
   role: string;
-  character_sheet: string;
-  user_notes: string;
+  characterSheet: string;
+  userNotes: string;
 }
 
 export interface Report {
   id: string;
-  project_id: string;
-  from_employee: EmployeeId;
-  parent_node_id?: string;
-  asked_to_do: string;
-  what_happened: string;
-  artifact?: string;
-  open_questions?: string;
-  recommended_next_move: string;
-  created_at: string;
+  projectId: string;
+  fromEmployee: EmployeeId;
+  parentNodeId: string | null;
+  askedToDo: string;
+  whatHappened: string;
+  artifact: string | null;
+  openQuestions: string | null;
+  recommendedNextMove: string;
+  createdAt: string;
 }
 
 export type Signal = "progress" | "blocked" | "stalled" | "done" | "needs_attention";
 
 export interface StatusPing {
-  project_id: string;
+  projectId: string;
   summary: string;
   signal: Signal;
-  created_at: string;
+  createdAt: string;
 }
 
 export type ChatStatus = "active" | "wrapped";
 
 export interface Chat {
   id: string;
-  project_id?: string;
-  employee_id?: EmployeeId;
-  parent_chat_id?: string;
+  projectId: string | null;
+  employeeId: EmployeeId | null;
+  parentChatId: string | null;
   status: ChatStatus;
-  task_brief: string;
-  messages: Message[];
-  created_at: string;
+  taskBrief: string;
+  createdAt: string;
 }
 
 export type MessageRole = "user" | "assistant" | "system";
 
 export interface Message {
   id: string;
-  chat_id: string;
+  chatId: string;
   role: MessageRole;
   content: string;
-  created_at: string;
+  createdAt: string;
 }
 
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
 export interface ExecutionJob {
   id: string;
-  project_id: string;
-  chat_id: string;
+  projectId: string;
+  chatId: string;
   prompt: string;
   status: JobStatus;
-  output_stream?: string;
-  diff_summary?: string;
-  created_at: string;
-  completed_at?: string;
+  outputStream: string | null;
+  diffSummary: string | null;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface CEOState {
-  long_term_notes: string;
-  pattern_notes: string;
-  last_briefing_to_user: string;
-  last_user_seen_at: string;
+  longTermNotes: string;
+  patternNotes: string;
+  lastBriefingToUser: string;
+  lastUserSeenAt: string;
 }

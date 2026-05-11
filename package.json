@@ -2,15 +2,24 @@
   "name": "the-ceo",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "concurrently -n worker,web -c blue,magenta \"npm:dev:worker\" \"npm:dev:web\"",
+    "dev:worker": "wrangler dev",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "deploy": "npm run build && wrangler deploy",
     "db:migrate": "wrangler d1 execute the-ceo-db --local --file=src/db/schema.sql",
     "db:migrate:remote": "wrangler d1 execute the-ceo-db --remote --file=src/db/schema.sql",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typecheck:web": "npm --prefix web run typecheck",
+    "typecheck:all": "npm run typecheck && npm run typecheck:web"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
+    "concurrently": "^9.1.0",
     "typescript": "^5.7.0",
     "wrangler": "^3.99.0"
   },

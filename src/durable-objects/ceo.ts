@@ -4,7 +4,12 @@ import { maybeUpdatePatternNotes } from "../lib/digest";
 
 /**
  * The CEO's permanent system prompt — the soul of the chief-of-staff voice.
- * Verbatim from run #2 spec. Refine only by sharpening; never soften.
+ * Verbatim from run #2 spec, with the cast-suggestion section appended for
+ * run #4 (the UI run). Refine only by sharpening; never soften.
+ *
+ * Note: backticks inside the template literal are escaped so the runtime
+ * string contains the literal triple-backtick fence the CEO is instructed
+ * to emit.
  */
 const CEO_SYSTEM_PROMPT = `You are The CEO — Chief Executive Orchestrator. You work for your principal (the user).
 
@@ -18,7 +23,79 @@ When your principal opens you, you greet them with what's actually relevant — 
 
 You speak like a sharp, warm chief of staff. Direct. Concise. Willing to push back. You don't pad your responses. You don't apologize unnecessarily. You don't ask "would you like me to" — if it's the obvious next move, you do it or you propose it directly.
 
-You are part of a system called The CEO that is currently being built. Right now you have no project memory yet — that's coming in the next phase. For now, just be yourself. If your principal asks about your projects or your staff, be honest: the system is under construction, the staff exists in spec, and project tracking is coming next.`;
+## Suggesting a cast
+
+When the right next move is to bring an employee into a conversation with the user, you can suggest casting one. To do so, include in your response a fenced block in this exact format:
+
+\`\`\`cast
+employee: nora | iris | theo | dex
+project: <project_id>
+task: <one-line task brief for the employee, in your voice>
+reason: <one-line reason for the user, why this employee for this task>
+\`\`\`
+
+You don't always suggest casting. Only when it's the obvious right move. Most messages won't include a cast block. The user can also ignore your suggestion — it's a recommendation, not an action you're taking on their behalf.
+
+Use the literal project UUID from the portfolio block above for the project line. Don't invent IDs. If there's no project that fits, don't cast — say what you'd want to know first.
+
+## Your other tools
+
+You have four other tools in addition to casting. Each is invoked by emitting a fenced block in your response, exactly like cast blocks. The frontend parses these blocks and either executes them immediately (auto) or renders an affordance for the user to click (confirm).
+
+**create_project (confirm)**
+
+Use when the user has described a new effort that isn't already a project in your portfolio, and a project should exist to hold the work. Don't propose creating a project for every passing idea — only when the user has signaled this is real and ongoing.
+
+\`\`\`create_project
+name: <suggested project name, short, in title case>
+initial_goal: <one or two sentence goal statement>
+reason: <one line, why you're suggesting this — user-facing>
+\`\`\`
+
+**rename_project (auto — fires when you emit it; narrate in your message)**
+
+Use only when the user has expressed a clear preference for a different name, OR when the conversation has revealed the project is actually about something different and the current name is misleading. Don't rename based on subtle drift — wait for a clear signal.
+
+\`\`\`rename_project
+project: <project_id>
+new_name: <the new name>
+\`\`\`
+
+When you emit this, your message text should naturally acknowledge it. Example: "Renamed it to 'Onboarding redesign' — the previous name was outdated." Don't say "I have used the rename_project tool." Just speak normally about what you did.
+
+**update_briefing (auto — fires when you emit it; narrate in your message)**
+
+Use when the conversation has materially shifted the project — a new goal, a new state, a new next move that's clearly more accurate than what the briefing currently says. Don't update on every conversation; the wrap-chat flow handles routine updates from employee reports. This tool is for mid-conversation shifts you and the user agree on.
+
+\`\`\`update_briefing
+project: <project_id>
+field: goal | state | nextMove | why
+value: <the new value for that field>
+\`\`\`
+
+Only one field per block. If multiple fields need updating, emit multiple blocks.
+
+When you emit this, your message text should naturally acknowledge it. Example: "I've updated the project's next move to reflect what we just decided."
+
+**create_repo (confirm)**
+
+Use when a project clearly needs a GitHub repository and doesn't have one yet (project.repoPath is empty). Also acceptable for net-new projects that the user wants to start with a repo from the outset.
+
+\`\`\`create_repo
+project: <project_id, optional — if omitted, repo is created standalone>
+name: <repo name, lowercase-hyphen-case, e.g. "the-ceo">
+description: <one sentence describing the repo>
+private: true
+\`\`\`
+
+Default to private. Only set \`private: false\` if the user has explicitly said the repo should be public.
+
+## General principles for tool use
+
+- Don't reach for tools when conversation is enough. Most of your messages won't contain any action blocks. Tools are for moments of real action, not constant ceremony.
+- When you do use a tool, narrate it naturally in the surrounding message. The tool is the machine instruction; your prose is the human acknowledgment.
+- For auto-tools (rename_project, update_briefing): if you're uncertain, don't fire. Ask the user first, then fire on their confirmation in the next turn.
+- For confirm-tools (create_project, create_repo): the inline affordance is the user's signoff. Don't pre-confirm by asking them and then emitting the block — emit the block as your suggestion, let the user click or ignore.`;
 
 const RECENT_PINGS_LIMIT = 20;
 
@@ -55,13 +132,13 @@ export class CeoDO implements DurableObject {
       return new Response("Method not allowed", { status: 405 });
     }
     const body = (await request.json().catch(() => null)) as
-      | { chat_id?: string; message?: string }
+      | { chatId?: string; message?: string }
       | null;
     if (!body?.message?.trim()) {
       return new Response("Missing 'message' in body", { status: 400 });
     }
 
-    const chatId = body.chat_id ?? crypto.randomUUID();
+    const chatId = body.chatId ?? crypto.randomUUID();
     const context = await this.buildContext();
     const systemPrompt = `${context}\n\n${CEO_SYSTEM_PROMPT}`;
 
@@ -86,7 +163,7 @@ export class CeoDO implements DurableObject {
    */
   private async buildContext(): Promise<string> {
     const { results: projectRows } = await this.env.DB.prepare(
-      `SELECT p.id, p.name, b.goal, b.state, b.next_move, b.why
+      `SELECT p.id, p.name, b.goal, b.state, b.next_move AS nextMove, b.why
        FROM projects p
        LEFT JOIN briefings b ON b.project_id = p.id
        WHERE p.status = 'active'
@@ -96,27 +173,27 @@ export class CeoDO implements DurableObject {
       name: string;
       goal: string;
       state: string;
-      next_move: string;
+      nextMove: string;
       why: string;
     }>();
 
     const { results: pingRows } = await this.env.DB.prepare(
-      `SELECT sp.summary, sp.signal, sp.created_at, p.name AS project_name
+      `SELECT sp.summary, sp.signal, sp.created_at AS createdAt, p.name AS projectName
        FROM status_pings sp
        JOIN projects p ON p.id = sp.project_id
        ORDER BY sp.created_at DESC, sp.id DESC
        LIMIT ?`,
     )
       .bind(RECENT_PINGS_LIMIT)
-      .all<{ summary: string; signal: string; created_at: string; project_name: string }>();
+      .all<{ summary: string; signal: string; createdAt: string; projectName: string }>();
 
     await this.env.DB.prepare("INSERT OR IGNORE INTO ceo_state (id) VALUES (1)").run();
     const ceoState =
       (await this.env.DB.prepare(
-        "SELECT long_term_notes, pattern_notes FROM ceo_state WHERE id = 1",
-      ).first<{ long_term_notes: string; pattern_notes: string }>()) ?? {
-        long_term_notes: "",
-        pattern_notes: "",
+        "SELECT long_term_notes AS longTermNotes, pattern_notes AS patternNotes FROM ceo_state WHERE id = 1",
+      ).first<{ longTermNotes: string; patternNotes: string }>()) ?? {
+        longTermNotes: "",
+        patternNotes: "",
       };
 
     const lines: string[] = [];
@@ -131,7 +208,7 @@ export class CeoDO implements DurableObject {
         lines.push(`- ${p.name} (id: ${p.id})`);
         lines.push(`    Goal: ${p.goal || "(not set)"}`);
         lines.push(`    State: ${p.state || "(not set)"}`);
-        lines.push(`    Next move: ${p.next_move || "(not set)"}`);
+        lines.push(`    Next move: ${p.nextMove || "(not set)"}`);
         lines.push(`    Why: ${p.why || "(not set)"}`);
       }
     }
@@ -142,20 +219,20 @@ export class CeoDO implements DurableObject {
     } else {
       lines.push(`Recent activity (last ${pingRows.length} pings, newest first):`);
       for (const ping of pingRows) {
-        lines.push(`- [${ping.created_at}] ${ping.project_name}: ${ping.summary} [${ping.signal}]`);
+        lines.push(`- [${ping.createdAt}] ${ping.projectName}: ${ping.summary} [${ping.signal}]`);
       }
     }
     lines.push("");
 
-    if (ceoState.long_term_notes.trim()) {
+    if (ceoState.longTermNotes.trim()) {
       lines.push("Your running notes about your principal:");
-      lines.push(ceoState.long_term_notes.trim());
+      lines.push(ceoState.longTermNotes.trim());
       lines.push("");
     }
 
-    if (ceoState.pattern_notes.trim()) {
+    if (ceoState.patternNotes.trim()) {
       lines.push("Cross-project patterns you've noticed:");
-      lines.push(ceoState.pattern_notes.trim());
+      lines.push(ceoState.patternNotes.trim());
       lines.push("");
     }
 
@@ -174,23 +251,23 @@ export class CeoDO implements DurableObject {
   }
 
   /**
-   * Receive a ping from a Project DO. Loads CEO state + recent pings + the
-   * new ping, asks Claude whether the running pattern_notes need updating,
-   * and persists if so. Idempotent on repeats — Claude returns null when no
-   * change is warranted.
+   * Receive a ping from a Project DO. Body uses camelCase. Loads CEO state +
+   * recent pings + the new ping, asks Claude whether the running pattern_notes
+   * need updating, and persists if so. Idempotent on repeats — Claude returns
+   * null when no change is warranted.
    */
   private async ingestStatusPing(request: Request): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
     const body = (await request.json().catch(() => null)) as {
-      project_id?: string;
-      project_name?: string;
+      projectId?: string;
+      projectName?: string;
       summary?: string;
       signal?: string;
-      created_at?: string;
+      createdAt?: string;
     } | null;
-    if (!body?.project_id || !body.project_name || !body.summary || !body.signal) {
+    if (!body?.projectId || !body.projectName || !body.summary || !body.signal) {
       return new Response(JSON.stringify({ error: "missing ping fields" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
@@ -200,27 +277,27 @@ export class CeoDO implements DurableObject {
     await this.env.DB.prepare("INSERT OR IGNORE INTO ceo_state (id) VALUES (1)").run();
     const ceoState =
       (await this.env.DB.prepare(
-        "SELECT pattern_notes FROM ceo_state WHERE id = 1",
-      ).first<{ pattern_notes: string }>()) ?? { pattern_notes: "" };
+        "SELECT pattern_notes AS patternNotes FROM ceo_state WHERE id = 1",
+      ).first<{ patternNotes: string }>()) ?? { patternNotes: "" };
 
     const { results: recentPings } = await this.env.DB.prepare(
-      `SELECT sp.summary, sp.signal, sp.created_at, p.name AS project_name
+      `SELECT sp.summary, sp.signal, sp.created_at AS createdAt, p.name AS projectName
        FROM status_pings sp
        JOIN projects p ON p.id = sp.project_id
        ORDER BY sp.created_at DESC, sp.id DESC
        LIMIT ?`,
     )
       .bind(RECENT_PINGS_LIMIT)
-      .all<{ summary: string; signal: string; created_at: string; project_name: string }>();
+      .all<{ summary: string; signal: string; createdAt: string; projectName: string }>();
 
     const updated = await maybeUpdatePatternNotes(
-      ceoState.pattern_notes,
+      ceoState.patternNotes,
       recentPings,
       {
-        project_name: body.project_name,
+        projectName: body.projectName,
         summary: body.summary,
         signal: body.signal,
-        created_at: body.created_at,
+        createdAt: body.createdAt,
       },
       this.env.ANTHROPIC_API_KEY,
     );
@@ -232,24 +309,28 @@ export class CeoDO implements DurableObject {
     }
 
     return new Response(
-      JSON.stringify({ acknowledged: true, pattern_notes_updated: updated !== null }),
+      JSON.stringify({ acknowledged: true, patternNotesUpdated: updated !== null }),
       { headers: { "Content-Type": "application/json" } },
     );
   }
 
-  /** Return the CEO's current internal state (full row from D1). */
+  /** Return the CEO's current internal state (camelCase from D1). */
   private async getState(): Promise<Response> {
     await this.env.DB.prepare("INSERT OR IGNORE INTO ceo_state (id) VALUES (1)").run();
     const row = await this.env.DB.prepare(
-      "SELECT long_term_notes, pattern_notes, last_briefing_to_user, last_user_seen_at FROM ceo_state WHERE id = 1",
+      `SELECT long_term_notes AS longTermNotes,
+              pattern_notes AS patternNotes,
+              last_briefing_to_user AS lastBriefingToUser,
+              last_user_seen_at AS lastUserSeenAt
+       FROM ceo_state WHERE id = 1`,
     ).first<CEOState>();
     return new Response(
       JSON.stringify(
         row ?? {
-          long_term_notes: "",
-          pattern_notes: "",
-          last_briefing_to_user: "",
-          last_user_seen_at: "",
+          longTermNotes: "",
+          patternNotes: "",
+          lastBriefingToUser: "",
+          lastUserSeenAt: "",
         },
       ),
       { headers: { "Content-Type": "application/json" } },

@@ -43,25 +43,27 @@ export class EmployeeDO implements DurableObject {
   }
 
   /**
-   * Handle a chat turn. Optional `project_id` in the body activates project
+   * Handle a chat turn. Optional `projectId` in the body activates project
    * casting — the system prompt grows to include the project briefing and
-   * this employee's recent reports on it.
+   * this employee's recent reports on it. If a chat row already exists with
+   * a non-empty task_brief (set by /cast), that brief is woven in as the
+   * assignment.
    */
   private async handleChat(request: Request, employeeId: EmployeeId): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
     const body = (await request.json().catch(() => null)) as
-      | { chat_id?: string; message?: string; project_id?: string }
+      | { chatId?: string; message?: string; projectId?: string }
       | null;
     if (!body?.message?.trim()) {
       return new Response("Missing 'message' in body", { status: 400 });
     }
 
-    const chatId = body.chat_id ?? crypto.randomUUID();
-    const projectId = body.project_id?.trim() || undefined;
+    const chatId = body.chatId ?? crypto.randomUUID();
+    const projectId = body.projectId?.trim() || undefined;
 
-    const systemPrompt = await this.buildSystemPrompt(employeeId, projectId);
+    const systemPrompt = await this.buildSystemPrompt(employeeId, projectId, chatId);
 
     const resp = await handleChatTurn({
       db: this.env.DB,
@@ -82,38 +84,45 @@ export class EmployeeDO implements DurableObject {
 
   /**
    * Compose the employee's system prompt. Order: character sheet → project
-   * casting block (if cast) → private user notes. Project block carries the
-   * current briefing plus this employee's recent reports on the project — so
-   * Nora walks into a Project 3 chat already knowing what she's done there
-   * before.
+   * casting block (if cast) → assignment brief from the chat row (if set) →
+   * private user notes. Project block carries the current briefing plus this
+   * employee's recent reports on the project — so Nora walks into a Project 3
+   * chat already knowing what she's done there before. If /cast set a
+   * task_brief on the chat row, it appears as the specific assignment.
    */
   private async buildSystemPrompt(
     employeeId: EmployeeId,
-    projectId?: string,
+    projectId: string | undefined,
+    chatId: string,
   ): Promise<string> {
     const character = CHARACTER_SHEETS[employeeId];
 
     let projectBlock = "";
     if (projectId) {
       const project = await this.env.DB.prepare(
-        `SELECT p.name, b.goal, b.state, b.next_move, b.why
+        `SELECT p.name,
+                b.goal, b.state,
+                b.next_move AS nextMove,
+                b.why
          FROM projects p
          LEFT JOIN briefings b ON b.project_id = p.id
          WHERE p.id = ?`,
       )
         .bind(projectId)
-        .first<{ name: string; goal: string; state: string; next_move: string; why: string }>();
+        .first<{ name: string; goal: string; state: string; nextMove: string; why: string }>();
 
       if (project) {
         const { results: reports } = await this.env.DB.prepare(
-          `SELECT what_happened, recommended_next_move, created_at
+          `SELECT what_happened AS whatHappened,
+                  recommended_next_move AS recommendedNextMove,
+                  created_at AS createdAt
            FROM reports
            WHERE project_id = ? AND from_employee = ?
            ORDER BY created_at DESC, id DESC
            LIMIT ?`,
         )
           .bind(projectId, employeeId, RECENT_REPORTS_LIMIT)
-          .all<{ what_happened: string; recommended_next_move: string; created_at: string }>();
+          .all<{ whatHappened: string; recommendedNextMove: string; createdAt: string }>();
 
         const lines: string[] = [];
         lines.push(`## You're cast on this project: ${project.name}`);
@@ -121,7 +130,7 @@ export class EmployeeDO implements DurableObject {
         lines.push("Current briefing:");
         lines.push(`- Goal: ${project.goal || "(not set)"}`);
         lines.push(`- State: ${project.state || "(not set)"}`);
-        lines.push(`- Next move: ${project.next_move || "(not set)"}`);
+        lines.push(`- Next move: ${project.nextMove || "(not set)"}`);
         lines.push(`- Why: ${project.why || "(not set)"}`);
         lines.push("");
         if (reports.length > 0) {
@@ -130,7 +139,7 @@ export class EmployeeDO implements DurableObject {
           );
           for (const r of reports) {
             lines.push(
-              `- [${r.created_at}] Did: ${r.what_happened} | Recommended: ${r.recommended_next_move}`,
+              `- [${r.createdAt}] Did: ${r.whatHappened} | Recommended: ${r.recommendedNextMove}`,
             );
           }
         } else {
@@ -139,6 +148,19 @@ export class EmployeeDO implements DurableObject {
         projectBlock = `\n\n${lines.join("\n")}`;
       }
     }
+
+    // If the chat row already exists with a task_brief (set by /cast), use it
+    // as the assignment. New chats with no prior /cast will have no row yet,
+    // which is fine — the SELECT just returns null.
+    const chatRow = await this.env.DB.prepare(
+      "SELECT task_brief AS taskBrief FROM chats WHERE id = ?",
+    )
+      .bind(chatId)
+      .first<{ taskBrief: string }>();
+    const taskBrief = chatRow?.taskBrief?.trim() ?? "";
+    const taskBlock = taskBrief
+      ? `\n\n## Your specific assignment\n\n${taskBrief}`
+      : "";
 
     const notesRow = await this.env.DB.prepare(
       "SELECT notes FROM employee_notes WHERE employee_id = ?",
@@ -150,15 +172,11 @@ export class EmployeeDO implements DurableObject {
       ? `\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`
       : "";
 
-    return `${character.sheet}${projectBlock}${notesBlock}`;
+    return `${character.sheet}${projectBlock}${taskBlock}${notesBlock}`;
   }
 
   /** Get the employee's profile (character sheet + role) */
   private async getProfile(employeeId: EmployeeId): Promise<Response> {
-    // TODO: when notes management gets real, split this. /profile should return
-    // employee config (id/name/role/character_sheet) — immutable, from constants.
-    // /notes already exists for the mutable per-user notes. Currently /profile
-    // bundles user_notes into the Employee payload for v0 simplicity.
     const character = CHARACTER_SHEETS[employeeId];
     const notesRow = await this.env.DB.prepare(
       "SELECT notes FROM employee_notes WHERE employee_id = ?",
@@ -169,8 +187,8 @@ export class EmployeeDO implements DurableObject {
       id: employeeId,
       name: character.name,
       role: character.role,
-      character_sheet: character.sheet,
-      user_notes: notesRow?.notes ?? "",
+      characterSheet: character.sheet,
+      userNotes: notesRow?.notes ?? "",
     };
     return new Response(JSON.stringify(profile), {
       headers: { "Content-Type": "application/json" },
@@ -180,11 +198,11 @@ export class EmployeeDO implements DurableObject {
   /** Get this employee's accumulated notes about the user */
   private async getNotes(employeeId: EmployeeId): Promise<Response> {
     const row = await this.env.DB.prepare(
-      "SELECT notes, updated_at FROM employee_notes WHERE employee_id = ?",
+      "SELECT notes, updated_at AS updatedAt FROM employee_notes WHERE employee_id = ?",
     )
       .bind(employeeId)
-      .first<{ notes: string; updated_at: string }>();
-    return new Response(JSON.stringify(row ?? { notes: "", updated_at: null }), {
+      .first<{ notes: string; updatedAt: string }>();
+    return new Response(JSON.stringify(row ?? { notes: "", updatedAt: null }), {
       headers: { "Content-Type": "application/json" },
     });
   }

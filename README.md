@@ -37,16 +37,65 @@ v0 in progress. See [`docs/v0-scope.md`](docs/v0-scope.md) for what's being buil
 
 ## Local development
 
-Run `npm install`, drop your Anthropic key in `.dev.vars` as `ANTHROPIC_API_KEY=sk-ant-…`, then `npm run dev`.
+First-time setup:
+
+```bash
+npm install              # installs root + web (npm workspaces)
+cp web/.env.example web/.env   # set VITE_AUTH_TOKEN — same string is fine for v0
+```
+
+Then create `.dev.vars` in the repo root (plain UTF-8, no BOM — see below) with all three secrets the Worker reads:
+
+```
+ANTHROPIC_API_KEY=sk-ant-…
+AUTH_TOKEN=…
+GITHUB_TOKEN=…
+```
+
+- `ANTHROPIC_API_KEY` — required. Anthropic API key for every CEO/employee chat.
+- `AUTH_TOKEN` — required. Bearer token the Worker compares against `Authorization: Bearer …` on every `/api/*` call. Must match the value baked into the frontend via `VITE_AUTH_TOKEN` in `web/.env`. Without it the Worker returns `500 {"error":"auth not configured on server"}` on every API request.
+- `GITHUB_TOKEN` — required only for the `create_repo` action. A GitHub Personal Access Token with `repo` scope (classic or fine-grained). Without it, `POST /api/github/create-repo` returns `500 {"error":"GITHUB_TOKEN not configured on server"}`; the rest of the app still works.
+
+Run both the Worker and the Vite dev server with one command:
+
+```bash
+npm run dev
+```
+
+That starts:
+- the Cloudflare Worker on `http://localhost:8787` (handles `/api/*`)
+- the Vite dev server on `http://localhost:5173` (serves the React app, proxies `/api/*` to the Worker)
+
+Open `http://localhost:5173` in your browser.
 
 Note: `.dev.vars` must be plain UTF-8 with no BOM. PowerShell's default encodings often add a BOM or write UTF-16 — verify with `file .dev.vars` (expect `ASCII text`) or `head -c 3 .dev.vars | xxd` (expect the first byte to be `41` for `A`, not `ef bb bf` or `ff fe`).
 
 Wrangler dev caches `.dev.vars` values and may serve stale env on the first request after a swap. Workaround: `touch src/index.ts` (or any source file) to force a code reload after editing `.dev.vars`.
 
+## Deployment
+
+Single deploy target: the existing Cloudflare Worker. The built frontend ships as static assets bound to the Worker via `[assets]` in `wrangler.toml`, so the same Worker serves both `/api/*` and the SPA shell at every other path.
+
+```bash
+npm run build    # vite build → web/dist
+npm run deploy   # wrangler deploy (pushes the Worker + bundled assets)
+```
+
+`not_found_handling = "single-page-application"` means deep links (e.g. `/projects/abc/chat/xyz`) fall back to `index.html` so client-side routing resolves correctly.
+
+Production env vars (the Worker only):
+```bash
+npx wrangler secret put ANTHROPIC_API_KEY
+```
+
+The frontend bundle reads `VITE_AUTH_TOKEN` at build time from `web/.env`. v0 doesn't validate it server-side; we'll harden in a later run.
+
 ## Documents
 
 - [`docs/vision.md`](docs/vision.md) — Why this exists, the soul of the product
 - [`docs/architecture.md`](docs/architecture.md) — Technical shape
+- [`docs/design.md`](docs/design.md) — Visual and experiential specification
 - [`docs/employees.md`](docs/employees.md) — The staff roster and character sheets
 - [`docs/data-model.md`](docs/data-model.md) — Core data structures
 - [`docs/v0-scope.md`](docs/v0-scope.md) — What's in v0, what's explicitly out
+- [`docs/smoke-tests.md`](docs/smoke-tests.md) — End-to-end curl walkthrough

@@ -4,3 +4,7 @@ node_modules/
 dist/
 .DS_Store
 .claude/
+web/.env
+web/.env.local
+web/.env.production
+web/dist/

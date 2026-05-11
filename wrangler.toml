@@ -2,6 +2,15 @@ name = "the-ceo"
 main = "src/index.ts"
 compatibility_date = "2024-12-18"
 
+# Static frontend (built /web → web/dist). The Worker handles /api/* and
+# /health; everything else falls through to ASSETS.fetch() at the end of the
+# fetch handler. not_found_handling = "single-page-application" returns
+# index.html for deep links so client-side routing works.
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
 # D1 database
 [[d1_databases]]
 binding = "DB"
