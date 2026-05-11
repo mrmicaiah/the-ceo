@@ -1,15 +1,15 @@
 // Auto-action inline note: the CEO emitted an update_briefing block.
 // Fires POST /api/projects/:id/briefing-update once when this note mounts in
-// a live context. If the user is currently viewing this project's right rail
-// briefing, refresh it so the change animates in.
+// a live context, then dispatches a "ceo:briefing-updated" CustomEvent so any
+// open project workspace for this projectId can refresh its briefing rail.
 //
-// Idempotency: setting a field to the same value is harmless (it just bumps
-// updated_at). Acceptable cost for a guard that can't perfectly distinguish
-// "first fire" from "re-mount after history reload."
+// Run #7: briefings are no longer global state — each project workspace owns
+// its own briefing fetch. The custom event is how the auto-action talks to
+// open workspaces without coupling components.
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { getBriefing, updateBriefingField } from "../lib/api";
+import { updateBriefingField } from "../lib/api";
 import { useStore } from "../state/store";
 import type { BriefingField } from "../lib/actions";
 
@@ -28,7 +28,7 @@ const FIELD_LABELS: Record<BriefingField, string> = {
 };
 
 export function BriefingUpdateNote({ project, field, value, isLive }: Props) {
-  const { state, setBriefing } = useStore();
+  const { state } = useStore();
   const fired = useRef(false);
   const [_lastError, setLastError] = useState<string | null>(null);
 
@@ -42,17 +42,18 @@ export function BriefingUpdateNote({ project, field, value, isLive }: Props) {
     (async () => {
       try {
         await updateBriefingField(project, field, value);
-        // If the user is currently viewing this project's briefing, refresh
-        // it so the right rail animates the change.
-        if (state.currentBriefingProjectId === project) {
-          const fresh = await getBriefing(project).catch(() => null);
-          if (fresh) setBriefing(fresh, project);
-        }
+        // Tell any open workspace for this project that its briefing
+        // should be re-fetched.
+        window.dispatchEvent(
+          new CustomEvent("ceo:briefing-updated", {
+            detail: { projectId: project },
+          }),
+        );
       } catch (err) {
         setLastError((err as Error).message);
       }
     })();
-  }, [isLive, project, field, value, state.currentBriefingProjectId, setBriefing]);
+  }, [isLive, project, field, value]);
 
   return (
     <motion.div

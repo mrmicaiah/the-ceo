@@ -1,51 +1,49 @@
-// Three-pane shell per docs/design.md.
-//   Left rail (260px) — app title, CEO entry, project list.
-//   Main pane (flex) — CEO chat or employee chat or empty/new-project form.
-//   Right rail (340px) — briefing card (only when in a project chat).
+// Top-level layout. Workspace tabs span the full width across the top.
+// Below: a 260px left rail (project switcher) + the workspace content.
+//
+//   +---------------------------------------------------------------+
+//   | [The CEO] [Project A] [Project B]            + new project    |
+//   +---------------------------------------------------------------+
+//   | LEFT RAIL    | WORKSPACE CONTENT                              |
+//   | (260px)      | (varies by workspace type, see Workspace.tsx)  |
+//   +---------------------------------------------------------------+
 
 import { useState } from "react";
+import { useStore } from "../state/store";
 import { LeftRail } from "./LeftRail";
-import { MainPane } from "./MainPane";
-import { RightRail } from "./RightRail";
-import { useRouter } from "../router";
+import { NewProjectModal } from "./NewProjectModal";
+import { Workspace } from "./Workspace";
+import { WorkspaceTabBar } from "./WorkspaceTabBar";
 
 export function AppShell() {
-  const { route } = useRouter();
-  const [showNewProject, setShowNewProject] = useState(false);
-
-  const isProjectChat = route.kind === "employee-chat";
+  const { state } = useStore();
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
 
   return (
-    <div
-      className="relative flex h-full w-full overflow-hidden"
-      style={{ position: "relative", zIndex: 0 }}
-    >
-      <aside
-        className="shrink-0 border-r border-divider"
-        style={{ width: 260 }}
-      >
-        <LeftRail
-          onNewProject={() => setShowNewProject(true)}
-          onCeoSelected={() => setShowNewProject(false)}
-        />
-      </aside>
+    <div className="relative flex h-full w-full overflow-hidden flex-col">
+      <WorkspaceTabBar onNewProject={() => setNewProjectOpen(true)} />
 
-      <main className="flex-1 min-w-0">
-        <MainPane
-          showNewProject={showNewProject}
-          onCancelNewProject={() => setShowNewProject(false)}
-          onProjectCreated={() => setShowNewProject(false)}
-        />
-      </main>
-
-      {isProjectChat && !showNewProject && (
+      <div className="flex flex-1 min-h-0">
         <aside
-          className="shrink-0 border-l border-divider hidden lg:block"
-          style={{ width: 340 }}
+          className="shrink-0 border-r border-divider"
+          style={{ width: 260 }}
         >
-          <RightRail />
+          <LeftRail onNewProject={() => setNewProjectOpen(true)} />
         </aside>
-      )}
+        <main className="flex-1 min-w-0">
+          <Workspace
+            // Re-mount the inner Workspace when the active workspace changes
+            // so per-workspace state (briefing fetch, scroll, etc.) is fresh.
+            key={state.activeWorkspaceId}
+            workspaceId={state.activeWorkspaceId}
+          />
+        </main>
+      </div>
+
+      <NewProjectModal
+        open={newProjectOpen}
+        onClose={() => setNewProjectOpen(false)}
+      />
     </div>
   );
 }

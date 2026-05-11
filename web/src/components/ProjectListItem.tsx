@@ -1,25 +1,38 @@
-// A single project row in the left rail. Two affordances on one line:
-//   - the project name itself navigates (button)
-//   - a small "rename" hover-reveal to the right enters edit mode
+// A single project row in the left rail. Carries three pieces of state:
+//   - open?    workspace tab exists at the top
+//   - active?  is THE current workspace (also implies open)
+//   - editing? rename mode
 //
-// Edit mode replaces the row with an inline text input styled to match the
-// surrounding type. Enter commits, Escape cancels, blur commits. The input
-// PATCHes /api/projects/:id and refreshes the store on success.
+// Visual:
+//   - open + inactive: ink + 1px accent left-edge bar
+//   - open + active:   ink (bold) + 1px accent left-edge bar
+//   - closed:          muted, no bar
+//
+// Click on name:
+//   - if closed: open + switch
+//   - if open:   switch (no toggle off)
+//
+// Hover reveals on the right: lowercase muted "open"/"close" affordance
+// (toggles workspace), plus a rename link.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { useRouter, pathForEmployeeChat } from "../router";
 import { patchProject } from "../lib/api";
 import { useStore } from "../state/store";
-import type { ProjectListItem as ProjectListItemType } from "../types";
+import { workspaceIdForProject, type ProjectListItem as ProjectListItemType } from "../types";
 
 interface Props {
   project: ProjectListItemType;
+  open: boolean;
   active: boolean;
 }
 
-export function ProjectListItem({ project, active }: Props) {
-  const { navigate } = useRouter();
-  const { updateProjectLocal } = useStore();
+export function ProjectListItem({ project, open, active }: Props) {
+  const {
+    updateProjectLocal,
+    openWorkspace,
+    closeWorkspace,
+    switchWorkspace,
+  } = useStore();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(project.name);
   const [pending, setPending] = useState(false);
@@ -28,7 +41,6 @@ export function ProjectListItem({ project, active }: Props) {
   useEffect(() => {
     if (editing) {
       setDraft(project.name);
-      // Autofocus + select the text so a single keystroke replaces.
       requestAnimationFrame(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
@@ -36,8 +48,20 @@ export function ProjectListItem({ project, active }: Props) {
     }
   }, [editing, project.name]);
 
-  const onNavigate = () => {
-    navigate("/");
+  const onNameClick = () => {
+    if (!open) {
+      openWorkspace(project.id, /* activate */ true);
+    } else {
+      switchWorkspace(workspaceIdForProject(project.id));
+    }
+  };
+
+  const onToggleOpen = () => {
+    if (open) {
+      closeWorkspace(project.id);
+    } else {
+      openWorkspace(project.id, /* activate */ true);
+    }
   };
 
   const startEdit = () => {
@@ -48,7 +72,6 @@ export function ProjectListItem({ project, active }: Props) {
   const commit = async () => {
     if (!editing) return;
     const next = draft.trim();
-    // No-op if empty or unchanged.
     if (!next || next === project.name) {
       setEditing(false);
       setDraft(project.name);
@@ -59,8 +82,7 @@ export function ProjectListItem({ project, active }: Props) {
       const updated = await patchProject(project.id, { name: next });
       updateProjectLocal(updated);
     } catch {
-      // Silent on error in v0 — the rail returns to the prior name. Could
-      // surface a toast later when we have a notification surface.
+      // Silent fallback on error in v0 — the rail returns to the prior name.
     } finally {
       setEditing(false);
       setPending(false);
@@ -84,7 +106,7 @@ export function ProjectListItem({ project, active }: Props) {
 
   return (
     <li className="group relative">
-      {active && (
+      {open && (
         <span
           aria-hidden
           className="absolute left-0 top-2 bottom-2 w-px bg-accent pointer-events-none"
@@ -107,30 +129,37 @@ export function ProjectListItem({ project, active }: Props) {
       ) : (
         <>
           <button
-            onClick={onNavigate}
+            onClick={onNameClick}
             className="block w-full text-left px-3 py-2 hover:bg-surface/60 transition-colors"
           >
             <span
               className={`font-display text-[15px] ${
-                active ? "text-accent" : "text-ink"
-              }`}
+                open ? "text-ink" : "text-muted"
+              } ${active ? "font-semibold" : ""}`}
             >
               {project.name}
             </span>
           </button>
-          <button
-            type="button"
-            onClick={startEdit}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted opacity-0 group-hover:opacity-100 hover:text-ink focus:opacity-100 transition-opacity"
-            aria-label={`Rename project ${project.name}`}
-          >
-            rename
-          </button>
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-3 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+            <button
+              type="button"
+              onClick={onToggleOpen}
+              className="text-[11px] text-muted hover:text-ink"
+              aria-label={open ? `Close ${project.name} workspace` : `Open ${project.name} workspace`}
+            >
+              {open ? "close" : "open"}
+            </button>
+            <button
+              type="button"
+              onClick={startEdit}
+              className="text-[11px] text-muted hover:text-ink"
+              aria-label={`Rename project ${project.name}`}
+            >
+              rename
+            </button>
+          </div>
         </>
       )}
     </li>
   );
 }
-
-// Helper: used by other components that need to compute a chat URL.
-export { pathForEmployeeChat };

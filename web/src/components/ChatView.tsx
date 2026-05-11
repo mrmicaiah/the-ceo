@@ -1,23 +1,41 @@
 // The central chat view. Renders the message transcript and the composer.
 // Owns the per-chat message state (fetched on mount). Streams responses.
-// For project chats, also owns the wrap affordance and pushes the resulting
-// updated briefing into global state so the right rail can animate.
+//
+// Run #7 refactor: ChatView no longer fetches briefings or touches global
+// store. The Workspace that owns this chat fetches the project briefing
+// once; ChatView reports wrap results back via the onWrapped callback.
+//
+// Props split into two shapes:
+//   - kind="ceo" — used inside the CEO workspace; renders no header (the
+//     workspace chrome provides whatever it needs).
+//   - kind="employee" — used inside a ChatPane in a project workspace. The
+//     pane provides its own header + wrap; ChatView hides its internal
+//     header when hideHeader=true.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBriefing, getChat, sendCeoMessage, sendEmployeeMessage } from "../lib/api";
-import { useStore } from "../state/store";
+import { getChat, sendCeoMessage, sendEmployeeMessage } from "../lib/api";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { WrapChatButton } from "./WrapChatButton";
 import { CHARACTER_NAMES } from "./characterNames";
-import type { ChatMessage, EmployeeId } from "../types";
+import type { ChatMessage, EmployeeId, Briefing } from "../types";
 
 type Props =
   | { kind: "ceo"; chatId: string }
-  | { kind: "employee"; chatId: string; projectId: string };
+  | {
+      kind: "employee";
+      chatId: string;
+      projectId: string;
+      hideHeader?: boolean;
+      // Called when wrap-chat completes successfully — passes the updated
+      // briefing up to the workspace so the rail can refresh.
+      onWrapped?: (briefing: Briefing | null) => void;
+      // Called when the user interacts with this pane (focus composer,
+      // send, click) so the workspace can bump lastInteractionAt for LRU.
+      onInteraction?: () => void;
+    };
 
 export function ChatView(props: Props) {
-  const { state: storeState, setBriefing, refreshProjects } = useStore();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streamingAssistant, setStreamingAssistant] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState<EmployeeId | null>(null);
@@ -28,7 +46,6 @@ export function ChatView(props: Props) {
   // Initial load — fetch existing chat metadata + history if any.
   useEffect(() => {
     let canceled = false;
-
     (async () => {
       try {
         const chat = await getChat(props.chatId);
@@ -39,7 +56,7 @@ export function ChatView(props: Props) {
           if (chat.status === "wrapped") setChatWrapped(true);
         }
       } catch {
-        // 404 / no chat yet — fine for new conversations. Surface only real errors.
+        // 404 / no chat yet — fine for new conversations.
       }
     })();
 
@@ -49,38 +66,20 @@ export function ChatView(props: Props) {
     };
   }, [props.chatId]);
 
-  // Load the briefing into global state for the right rail.
-  useEffect(() => {
-    if (props.kind !== "employee") {
-      setBriefing(null, null);
-      return;
-    }
-    let canceled = false;
-    (async () => {
-      try {
-        const briefing = await getBriefing(props.projectId);
-        if (!canceled) setBriefing(briefing, props.projectId);
-      } catch (err) {
-        if (!canceled) setBriefing(null, null);
-        if (!canceled) setError((err as Error).message);
-      }
-    })();
-    return () => {
-      canceled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.kind, props.kind === "employee" ? props.projectId : null]);
-
   const isStreaming = streamingAssistant !== null;
+
+  const touch = useCallback(() => {
+    if (props.kind === "employee" && props.onInteraction) {
+      props.onInteraction();
+    }
+  }, [props]);
 
   const onSend = useCallback(
     async (text: string) => {
       if (isStreaming || chatWrapped) return;
       setError(null);
+      touch();
 
-      // Optimistically append the user message and open a placeholder for
-      // the assistant. The server will assign real ids on persist; we use
-      // ephemeral ones in the meantime.
       const userMsg: ChatMessage = {
         id: `local-user-${Date.now()}`,
         chatId: props.chatId,
@@ -101,8 +100,6 @@ export function ChatView(props: Props) {
           setStreamingAssistant(assistantBuffer);
         },
         onDone: () => {
-          // Commit the streamed assistant message to the messages list and
-          // clear the streaming buffer.
           if (assistantBuffer.length > 0) {
             setMessages((prev) => [
               ...prev,
@@ -125,15 +122,12 @@ export function ChatView(props: Props) {
 
       try {
         if (props.kind === "ceo") {
-          await sendCeoMessage({ chatId: props.chatId, message: text }, handlers, ctrl.signal);
-          // After a CEO message, refresh the projects list — the CEO may have
-          // referenced a project we haven't loaded yet, or a new ping may have
-          // moved the order. Cheap call.
-          refreshProjects();
+          await sendCeoMessage(
+            { chatId: props.chatId, message: text },
+            handlers,
+            ctrl.signal,
+          );
         } else {
-          // Default to a known employee. The chat row created via /cast has
-          // the employeeId set; we discovered it on mount. If unknown, default
-          // to dex (won't happen in normal flow but defensive).
           const empId = employeeId ?? "dex";
           await sendEmployeeMessage(
             {
@@ -153,27 +147,23 @@ export function ChatView(props: Props) {
         }
       }
     },
-    [
-      isStreaming,
-      chatWrapped,
-      props,
-      employeeId,
-      refreshProjects,
-    ],
+    [isStreaming, chatWrapped, props, employeeId, touch],
   );
 
-  // Heading text for the chat. For project chats, show the project + employee.
+  // Computed labels — only used for the legacy in-component header (CEO
+  // workspace doesn't render one anyway; project workspaces use the pane
+  // wrapper's header).
   const employeeName = employeeId ? CHARACTER_NAMES[employeeId] : null;
-  // Project name for the wrap-chat note. Looked up from the rail's projects
-  // list so we don't have to re-fetch on every chat view mount.
-  const projectName =
-    props.kind === "employee"
-      ? storeState.projects.find((p) => p.id === props.projectId)?.name ?? null
-      : null;
+  const showLegacyHeader =
+    props.kind === "employee" &&
+    props.hideHeader !== true; // explicit opt-in for the pane wrapper
+
+  const projectId = props.kind === "employee" ? props.projectId : null;
+  const onWrappedCallback = props.kind === "employee" ? props.onWrapped : undefined;
 
   return (
-    <div className="h-full flex flex-col">
-      {props.kind === "employee" && (
+    <div className="h-full flex flex-col" onMouseDownCapture={touch}>
+      {showLegacyHeader && (
         <div className="px-10 pt-6 pb-3 flex items-center justify-between border-b border-divider">
           <div>
             <div className="text-[11px] uppercase tracking-[0.16em] text-muted">
@@ -184,13 +174,10 @@ export function ChatView(props: Props) {
             <WrapChatButton
               chatId={props.chatId}
               employeeName={employeeName}
-              projectName={projectName}
+              projectName={null}
               onWrapped={(briefing) => {
                 setChatWrapped(true);
-                if (briefing && props.kind === "employee") {
-                  setBriefing(briefing, props.projectId);
-                }
-                refreshProjects();
+                onWrappedCallback?.(briefing);
               }}
             />
           )}
@@ -213,17 +200,21 @@ export function ChatView(props: Props) {
         </div>
       )}
 
-      <div className="border-t border-divider px-10 py-5">
-        <Composer
-          onSend={onSend}
-          disabled={isStreaming || chatWrapped}
-        />
+      <div className="border-t border-divider px-10 py-5" onMouseDown={touch}>
+        <Composer onSend={onSend} disabled={isStreaming || chatWrapped} />
         {chatWrapped && (
-          <div className="mt-2 text-[12px] text-muted italic">
-            This chat is wrapped.
-          </div>
+          <div className="mt-2 text-[12px] text-muted italic">This chat is wrapped.</div>
         )}
       </div>
+
+      {/* Expose wrap state via a hidden marker so pane wrappers can show
+          "wrapped" UI if they want. The pane wrapper has its own knowledge
+          of the chat via the chat record; this is only here for the legacy
+          standalone path. */}
+      {/* Keep ts happy: reference projectId to avoid unused warnings. */}
+      <span className="hidden" aria-hidden>
+        {projectId}
+      </span>
     </div>
   );
 }

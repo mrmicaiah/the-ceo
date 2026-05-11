@@ -15,9 +15,16 @@ interface Props {
   employeeName: string | null;
   projectName: string | null;
   onWrapped: (newBriefing: Briefing | null) => void;
+  /**
+   * Compact mode: hide the explanatory note above the button. Used in the
+   * per-pane header strip where horizontal/vertical real estate is tight
+   * (multiple panes visible at once). The button label alone carries the
+   * affordance.
+   */
+  compact?: boolean;
 }
 
-export function WrapChatButton({ chatId, employeeName, projectName, onWrapped }: Props) {
+export function WrapChatButton({ chatId, employeeName, projectName, onWrapped, compact }: Props) {
   const [state, setState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -48,7 +55,7 @@ export function WrapChatButton({ chatId, employeeName, projectName, onWrapped }:
     );
   }
 
-  const showNote = !!employeeName && !!projectName;
+  const showNote = !compact && !!employeeName && !!projectName;
 
   return (
     <div className="flex flex-col items-end gap-1.5">

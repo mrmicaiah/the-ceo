@@ -1,13 +1,17 @@
 // Inline cast affordance: thin-ruled box, employee name in display, reason
-// in body, "Open chat →" button in accent. On click: POST /cast, then
-// navigate the user into the new context-loaded chat.
+// in body, "Open chat →" button in accent.
+//
+// Run #7: clicking no longer navigates to a chat URL. Instead we open the
+// project's workspace (if not already open), add the new chat to that
+// workspace's openChats, switch active to that workspace. The URL update
+// happens via the router sync hook listening to activeWorkspaceId.
 
 import { useState } from "react";
 import { motion } from "motion/react";
 import { castEmployee } from "../lib/api";
-import { pathForEmployeeChat, useRouter } from "../router";
+import { useStore } from "../state/store";
 import { CHARACTER_NAMES, CHARACTER_ROLES } from "./characterNames";
-import type { EmployeeId } from "../types";
+import { workspaceIdForProject, type EmployeeId } from "../types";
 
 interface Props {
   employee: EmployeeId;
@@ -18,7 +22,7 @@ interface Props {
 }
 
 export function CastSuggestion({ employee, project, task, reason, sourceChatId }: Props) {
-  const { navigate } = useRouter();
+  const { openWorkspace, openChat, switchWorkspace } = useStore();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +36,17 @@ export function CastSuggestion({ employee, project, task, reason, sourceChatId }
         task,
         sourceChatId,
       });
-      navigate(pathForEmployeeChat(result.projectId, result.chatId));
+      // Open the project's workspace (no-op if already open), add the new
+      // chat to its openChats, and switch active to it.
+      openWorkspace(result.projectId, /* activate */ true);
+      const workspaceId = workspaceIdForProject(result.projectId);
+      openChat({
+        workspaceId,
+        chatId: result.chatId,
+        employeeId: result.employee,
+        label: task,
+      });
+      switchWorkspace(workspaceId);
     } catch (e) {
       setError((e as Error).message);
       setPending(false);

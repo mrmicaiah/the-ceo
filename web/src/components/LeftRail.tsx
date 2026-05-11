@@ -1,33 +1,34 @@
 // Left rail: app title block, the CEO list item, a hairline rule, then the
-// project list. New-project affordance lives at the bottom.
+// project list. Each project row carries its "workspace open" state and an
+// "active workspace" highlight; toggling open/close moves the project in or
+// out of the top workspace tab bar.
+//
+// New project affordance stays at the bottom of the rail. (There's also one
+// at the right end of the workspace tab bar — both open the same modal.)
 
 import { useStore } from "../state/store";
-import { useRouter } from "../router";
 import { ProjectListItem } from "./ProjectListItem";
+import { workspaceIdForProject } from "../types";
 
 interface Props {
   onNewProject: () => void;
-  onCeoSelected: () => void;
 }
 
-export function LeftRail({ onNewProject, onCeoSelected }: Props) {
-  const { state } = useStore();
-  const { route, navigate } = useRouter();
+export function LeftRail({ onNewProject }: Props) {
+  const { state, switchWorkspace } = useStore();
+  const active = state.activeWorkspaceId;
+  const ceoActive = active === "ceo";
 
-  const ceoActive = route.kind === "home";
-  const activeProjectId = route.kind === "employee-chat" ? route.projectId : null;
+  const openWorkspaceIds = new Set(state.workspaces.map((w) => w.id));
 
-  const goHome = () => {
-    onCeoSelected();
-    navigate("/");
-  };
+  const goCeo = () => switchWorkspace("ceo");
 
   return (
     <div className="flex h-full flex-col" style={{ position: "relative", zIndex: 2 }}>
       {/* ── App title block ──────────────────────────────────────── */}
       <div className="px-6 pt-7 pb-6">
         <button
-          onClick={goHome}
+          onClick={goCeo}
           className="block w-full text-left"
           aria-label="Go to The CEO"
         >
@@ -40,7 +41,7 @@ export function LeftRail({ onNewProject, onCeoSelected }: Props) {
 
       {/* ── CEO entry ────────────────────────────────────────────── */}
       <nav className="px-3">
-        <CeoEntry active={ceoActive} onClick={goHome} />
+        <CeoEntry active={ceoActive} onClick={goCeo} />
       </nav>
 
       <div className="px-6 my-4">
@@ -67,13 +68,19 @@ export function LeftRail({ onNewProject, onCeoSelected }: Props) {
           </div>
         ) : (
           <ul className="space-y-px">
-            {state.projects.map((p) => (
-              <ProjectListItem
-                key={p.id}
-                project={p}
-                active={p.id === activeProjectId}
-              />
-            ))}
+            {state.projects.map((p) => {
+              const id = workspaceIdForProject(p.id);
+              const isOpen = openWorkspaceIds.has(id);
+              const isActive = isOpen && active === id;
+              return (
+                <ProjectListItem
+                  key={p.id}
+                  project={p}
+                  open={isOpen}
+                  active={isActive}
+                />
+              );
+            })}
           </ul>
         )}
       </div>
@@ -105,7 +112,7 @@ function CeoEntry({ active, onClick }: { active: boolean; onClick: () => void })
       )}
       <span
         className={`font-display text-[17px] ${
-          active ? "text-accent" : "text-ink"
+          active ? "text-accent font-semibold" : "text-ink"
         }`}
       >
         The CEO

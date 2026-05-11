@@ -142,3 +142,36 @@ export interface StreamFailedEvent {
   error: string;
   stage: "workspace" | "execution" | "diff";
 }
+
+// ── Workspaces (run #7) ──────────────────────────────────────────────
+//
+// A WorkspaceId is either "ceo" (the permanent chief-of-staff workspace)
+// or a project workspace tagged with the project's UUID. The template
+// literal type keeps usage type-safe at the union boundary.
+
+export type WorkspaceId = "ceo" | `project:${string}`;
+
+export interface OpenChat {
+  chatId: string;
+  employeeId: EmployeeId;
+  label: string; // derived from task_brief or "untitled"
+  visible: boolean; // true = in the grid; false = minimized to tab bar
+  lastInteractionAt: number; // ms since epoch; LRU sort key for auto-minimize
+}
+
+export interface WorkspaceState {
+  id: WorkspaceId;
+  projectId?: string; // present iff id starts with "project:"
+  openChats: OpenChat[]; // empty for CEO workspace; up to ~5 reasonable for projects
+  briefingCollapsed: boolean;
+}
+
+// Helpers used across the frontend.
+export function workspaceIdForProject(projectId: string): WorkspaceId {
+  return `project:${projectId}` as WorkspaceId;
+}
+
+export function projectIdFromWorkspaceId(id: WorkspaceId): string | null {
+  if (id === "ceo") return null;
+  return id.slice("project:".length);
+}
