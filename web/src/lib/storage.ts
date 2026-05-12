@@ -64,6 +64,43 @@ export function getDispatchedJobId(
   }
 }
 
+// ── Handoff sent state ───────────────────────────────────────────────
+//
+// When an employee emits a ```handoff block and the user clicks
+// "Send to <colleague> →", we POST and get back a new chatId. We persist
+// (sourceChatId, toEmployee, brief-hash) → newChatId in localStorage so a
+// reload (or remount) shows the "sent" state instead of re-offering the
+// action. Same pattern as dispatch-job persistence.
+
+function handoffKey(sourceChatId: string, toEmployee: string, brief: string): string {
+  return `theceo.handoff.${sourceChatId}.${toEmployee}.${shortHash(brief)}`;
+}
+
+export function rememberHandoffSent(
+  sourceChatId: string,
+  toEmployee: string,
+  brief: string,
+  newChatId: string,
+): void {
+  try {
+    window.localStorage.setItem(handoffKey(sourceChatId, toEmployee, brief), newChatId);
+  } catch {
+    // ignore
+  }
+}
+
+export function getHandoffSent(
+  sourceChatId: string,
+  toEmployee: string,
+  brief: string,
+): string | null {
+  try {
+    return window.localStorage.getItem(handoffKey(sourceChatId, toEmployee, brief));
+  } catch {
+    return null;
+  }
+}
+
 // ── Workspace state ─────────────────────────────────────────────────
 //
 // The workspace shape (which workspaces are open, the order, the active one,

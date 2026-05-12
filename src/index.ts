@@ -120,6 +120,15 @@ export default {
       return handleDispatchClaudeCode(env, dispatchMatch[1], request);
     }
 
+    // ── Handoff: POST /api/projects/:projectId/handoff ─────────────
+    // Staff-to-staff handoff (run #8). Mirrors /cast but with from/to
+    // semantics — refuses self-handoff. Must come before the subpath
+    // forwarder for the same routing reason as /cast.
+    const handoffMatch = path.match(/^\/api\/projects\/([^/]+)\/handoff$/);
+    if (handoffMatch && request.method === "POST") {
+      return handleHandoff(env, handoffMatch[1], request);
+    }
+
     // ── Single project GET / PATCH (bare /api/projects/:id) ────────
     const projectIdMatch = path.match(/^\/api\/projects\/([^/]+)$/);
     if (projectIdMatch && request.method === "GET") {
@@ -309,6 +318,68 @@ async function handleCast(env: Env, projectId: string, request: Request): Promis
     .run();
 
   return json({ chatId, employee: body.employee, projectId }, 201);
+}
+
+/**
+ * Staff-to-staff handoff. Same shape as /cast, different verb: from one
+ * named employee to another, with a brief composed in the originating
+ * employee's voice. Refuses self-handoff (return 400). The new chat's
+ * parent_chat_id points back to the source chat so the audit trail is
+ * preserved.
+ *
+ * Modeled directly on handleCast — the only semantic differences are:
+ * 1. We accept fromEmployee/toEmployee instead of just employee.
+ * 2. We reject fromEmployee === toEmployee with 400.
+ * 3. We use the spec's improved error message format on 404 (mirrors the
+ *    hallucination-guard wording from dispatch_claude_code).
+ */
+async function handleHandoff(env: Env, projectId: string, request: Request): Promise<Response> {
+  const body = (await request.json().catch(() => null)) as {
+    fromEmployee?: string;
+    toEmployee?: string;
+    brief?: string;
+    sourceChatId?: string;
+  } | null;
+
+  if (!body?.fromEmployee || !isEmployeeId(body.fromEmployee)) {
+    return json({ error: "missing or invalid 'fromEmployee'" }, 400);
+  }
+  if (!body?.toEmployee || !isEmployeeId(body.toEmployee)) {
+    return json({ error: "missing or invalid 'toEmployee'" }, 400);
+  }
+  if (body.fromEmployee === body.toEmployee) {
+    return json(
+      { error: "fromEmployee and toEmployee must differ — self-handoff not allowed" },
+      400,
+    );
+  }
+  if (typeof body.brief !== "string" || !body.brief.trim()) {
+    return json({ error: "missing 'brief'" }, 400);
+  }
+  if (typeof body.sourceChatId !== "string" || !body.sourceChatId.trim()) {
+    return json({ error: "missing 'sourceChatId'" }, 400);
+  }
+
+  const project = await env.DB.prepare("SELECT id FROM projects WHERE id = ?")
+    .bind(projectId)
+    .first<{ id: string }>();
+  if (!project) {
+    return json(
+      {
+        error: `No project found with id ${projectId}. The originating employee may have hallucinated the project ID — check that the project field in the handoff block matches a real project in your portfolio.`,
+      },
+      404,
+    );
+  }
+
+  const chatId = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO chats (id, project_id, employee_id, parent_chat_id, task_brief) VALUES (?, ?, ?, ?, ?)",
+  )
+    .bind(chatId, projectId, body.toEmployee, body.sourceChatId.trim(), body.brief.trim())
+    .run();
+
+  return json({ chatId, employee: body.toEmployee, projectId }, 201);
 }
 
 /**

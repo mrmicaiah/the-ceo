@@ -1,8 +1,8 @@
 // A single message in the transcript. Renders markdown for assistant
 // messages (paragraphs, emphasis, code, lists) and intercepts every fenced
 // action block (```cast, ```create_project, ```rename_project,
-// ```update_briefing, ```create_repo), replacing them with their
-// corresponding affordance or note component.
+// ```update_briefing, ```create_repo, ```dispatch_claude_code, ```handoff),
+// replacing them with their corresponding affordance or note component.
 
 import { useMemo, type ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
@@ -11,9 +11,11 @@ import { CastSuggestion } from "./CastSuggestion";
 import { CreateProjectSuggestion } from "./CreateProjectSuggestion";
 import { CreateRepoSuggestion } from "./CreateRepoSuggestion";
 import { DispatchClaudeCodeSuggestion } from "./DispatchClaudeCodeSuggestion";
+import { HandoffSuggestion } from "./HandoffSuggestion";
 import { RenameNote } from "./RenameNote";
 import { BriefingUpdateNote } from "./BriefingUpdateNote";
 import { ACTION_LANGS, parseActionBlock, type ParsedAction } from "../lib/actions";
+import type { EmployeeId } from "../types";
 
 interface Props {
   role: "user" | "assistant" | "system";
@@ -21,9 +23,21 @@ interface Props {
   speakerLabel: string;
   streaming?: boolean;
   sourceChatId: string;
+  // The employeeId of the chat this message lives in. Used by HandoffSuggestion
+  // to derive the 'from' field (handoff blocks deliberately don't carry it).
+  // null for CEO chats and for newly-created chats whose employeeId isn't
+  // resolved yet — HandoffSuggestion renders a disabled "can't send" state.
+  currentEmployeeId: EmployeeId | null;
 }
 
-export function Message({ role, content, speakerLabel, streaming, sourceChatId }: Props) {
+export function Message({
+  role,
+  content,
+  speakerLabel,
+  streaming,
+  sourceChatId,
+  currentEmployeeId,
+}: Props) {
   const isUser = role === "user";
 
   return (
@@ -48,6 +62,7 @@ export function Message({ role, content, speakerLabel, streaming, sourceChatId }
             content={content}
             sourceChatId={sourceChatId}
             isLive={!!streaming}
+            currentEmployeeId={currentEmployeeId}
           />
         )}
       </div>
@@ -64,10 +79,12 @@ function AssistantContent({
   content,
   sourceChatId,
   isLive,
+  currentEmployeeId,
 }: {
   content: string;
   sourceChatId: string;
   isLive: boolean;
+  currentEmployeeId: EmployeeId | null;
 }) {
   // Memoize the markdown tree on content so unrelated re-renders don't
   // re-parse. Note: action components themselves carry their own per-mount
@@ -154,6 +171,7 @@ function AssistantContent({
                     action={action}
                     sourceChatId={sourceChatId}
                     isLive={isLive}
+                    currentEmployeeId={currentEmployeeId}
                   />
                 );
               }
@@ -176,7 +194,7 @@ function AssistantContent({
         {content}
       </ReactMarkdown>
     ),
-    [content, sourceChatId, isLive],
+    [content, sourceChatId, isLive, currentEmployeeId],
   );
 }
 
@@ -184,10 +202,12 @@ function ActionRenderer({
   action,
   sourceChatId,
   isLive,
+  currentEmployeeId,
 }: {
   action: ParsedAction;
   sourceChatId: string;
   isLive: boolean;
+  currentEmployeeId: EmployeeId | null;
 }) {
   switch (action.type) {
     case "cast":
@@ -240,6 +260,16 @@ function ActionRenderer({
           project={action.project}
           summary={action.summary}
           prompt={action.prompt}
+          sourceChatId={sourceChatId}
+        />
+      );
+    case "handoff":
+      return (
+        <HandoffSuggestion
+          fromEmployee={currentEmployeeId}
+          toEmployee={action.toEmployee}
+          project={action.project}
+          brief={action.brief}
           sourceChatId={sourceChatId}
         />
       );

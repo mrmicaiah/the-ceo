@@ -283,6 +283,36 @@ export async function castEmployee(input: {
   return jsonOrThrow<CastResult>(resp);
 }
 
+// ── Handoff ─────────────────────────────────────────────────────────
+
+/**
+ * Staff-to-staff handoff. Creates a new chat under projectId with toEmployee,
+ * task_brief preloaded, parent_chat_id = sourceChatId. Server rejects
+ * self-handoff (from === to) with 400.
+ */
+export async function handoffToColleague(input: {
+  projectId: string;
+  fromEmployee: EmployeeId;
+  toEmployee: EmployeeId;
+  brief: string;
+  sourceChatId: string;
+}): Promise<CastResult> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(input.projectId)}/handoff`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        fromEmployee: input.fromEmployee,
+        toEmployee: input.toEmployee,
+        brief: input.brief,
+        sourceChatId: input.sourceChatId,
+      }),
+    },
+  );
+  return jsonOrThrow<CastResult>(resp);
+}
+
 // ── Streaming chat ──────────────────────────────────────────────────
 
 export interface StreamHandlers {

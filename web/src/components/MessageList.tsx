@@ -39,6 +39,7 @@ export function MessageList({ messages, streamingAssistant, sourceChatId, kind, 
                   m.role === "user" ? "You" : assistantLabel
                 }
                 sourceChatId={sourceChatId}
+                currentEmployeeId={employeeId}
               />
             </li>
           ))}
@@ -50,6 +51,7 @@ export function MessageList({ messages, streamingAssistant, sourceChatId, kind, 
                 speakerLabel={assistantLabel}
                 streaming
                 sourceChatId={sourceChatId}
+                currentEmployeeId={employeeId}
               />
             </li>
           )}

@@ -7,6 +7,8 @@
 //   - update_briefing (CEO)
 //   - create_repo     (CEO)
 //   - dispatch_claude_code (Dex)  — uses YAML pipe syntax for multi-line prompt
+//   - handoff         (any named employee) — uses YAML pipe for multi-line brief.
+//                     'from' is derived from rendering context, not the block.
 //
 // Returns null on any malformed input. Callers fall back to rendering the
 // original text as a regular code block.
@@ -52,6 +54,15 @@ export type ParsedAction =
       project: string;
       summary: string;
       prompt: string;
+    }
+  | {
+      type: "handoff";
+      toEmployee: EmployeeId;
+      project: string;
+      brief: string;
+      // 'from' is supplied by the renderer (which knows the current chat's
+      // employeeId). It's deliberately not in the block — the source is
+      // ambiguous-by-message-position by design.
     };
 
 export const ACTION_LANGS: ReadonlySet<string> = new Set([
@@ -61,6 +72,7 @@ export const ACTION_LANGS: ReadonlySet<string> = new Set([
   "update_briefing",
   "create_repo",
   "dispatch_claude_code",
+  "handoff",
 ]);
 
 export function parseActionBlock(
@@ -81,6 +93,8 @@ export function parseActionBlock(
       return parseCreateRepo(fields);
     case "dispatch_claude_code":
       return parseDispatchClaudeCode(fields);
+    case "handoff":
+      return parseHandoff(fields);
     default:
       return null;
   }
@@ -101,6 +115,8 @@ export function actionId(action: ParsedAction): string {
       return `create_repo:${action.project ?? "_"}:${action.name}`;
     case "dispatch_claude_code":
       return `dispatch_claude_code:${action.project}:${action.summary}`;
+    case "handoff":
+      return `handoff:${action.project}:${action.toEmployee}:${action.brief.slice(0, 64)}`;
   }
 }
 
@@ -257,5 +273,17 @@ function parseDispatchClaudeCode(f: Record<string, string>): ParsedAction | null
     project: f.project,
     summary: f.summary,
     prompt: f.prompt,
+  };
+}
+
+function parseHandoff(f: Record<string, string>): ParsedAction | null {
+  const toEmployee = f.to?.toLowerCase() as EmployeeId | undefined;
+  if (!toEmployee || !VALID_EMPLOYEES.has(toEmployee)) return null;
+  if (!f.project || !f.brief) return null;
+  return {
+    type: "handoff",
+    toEmployee,
+    project: f.project,
+    brief: f.brief,
   };
 }

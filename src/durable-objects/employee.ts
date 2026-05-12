@@ -1,6 +1,12 @@
 import { Env, EmployeeId, Employee } from "../types";
 import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
-import { CHARACTER_SHEETS, COMPANY_KNOWLEDGE, DEX_TOOLS, isEmployeeId } from "../lib/employees";
+import {
+  CHARACTER_SHEETS,
+  COMPANY_KNOWLEDGE,
+  DEX_TOOLS,
+  HANDOFF_TOOL,
+  isEmployeeId,
+} from "../lib/employees";
 
 const RECENT_REPORTS_LIMIT = 5;
 
@@ -207,15 +213,18 @@ export class EmployeeDO implements DurableObject {
       ? `\n\n## Your private notes about your principal (carries across conversations)\n\n${userNotes}`
       : "";
 
-    // Dex-only: append DEX_TOOLS between character sheet and project context.
-    // Other employees never see this section — they don't have dispatch yet.
-    const toolsBlock = employeeId === "dex" ? `\n\n${DEX_TOOLS}` : "";
+    // Handoff tool — appended for ALL four employees (run #8). Sits between
+    // the character sheet and any employee-specific tools (DEX_TOOLS).
+    const handoffBlock = `\n\n${HANDOFF_TOOL}`;
 
-    // Order: shared company knowledge → individual voice → (Dex's tools) →
-    // project context → assignment → private notes. Company knowledge is
-    // universal; the character sheet preserves the voice; tools are
-    // employee-specific; project/task context overlays.
-    return `${COMPANY_KNOWLEDGE}\n\n${character.sheet}${toolsBlock}${projectBlock}${taskBlock}${notesBlock}`;
+    // Dex-only: append DEX_TOOLS between handoff tool and project context.
+    // Other employees never see this section — they don't have dispatch yet.
+    const dexToolsBlock = employeeId === "dex" ? `\n\n${DEX_TOOLS}` : "";
+
+    // Order: shared company knowledge → individual voice → handoff tool
+    // (universal) → Dex's dispatch tool (Dex only) → project context →
+    // assignment → private notes.
+    return `${COMPANY_KNOWLEDGE}\n\n${character.sheet}${handoffBlock}${dexToolsBlock}${projectBlock}${taskBlock}${notesBlock}`;
   }
 
   /**
