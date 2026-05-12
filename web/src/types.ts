@@ -1,8 +1,9 @@
 // Mirror of the public API surface from the Worker. CamelCase throughout.
 //
-// v2: no per-employee identity. `EmployeeId`, employee chat metadata, and
-// per-chat openChats[] arrays are gone. A workspace is a project; the
-// manager's chat is the workspace's content.
+// v3 (run #10): GitHub IS the project list. Project rows are minimum chat
+// plumbing — `id`, `repoFullName`, `cloneUrl`, `createdAt`. The picker reads
+// the merged repo list (GitHub × D1) on demand; the store only tracks
+// workspaces (open projects).
 
 export type Signal =
   | "progress"
@@ -11,28 +12,46 @@ export type Signal =
   | "done"
   | "needs_attention";
 
-export type ProjectStatus = "active" | "dormant" | "archived";
+// ── Projects (v3 minimal shape) ──────────────────────────────────────
 
+/** A claimed repo. The D1 row carries no substantive memory; `.ceo/*` does. */
 export interface ProjectListItem {
   id: string;
-  name: string;
-  status: ProjectStatus;
-  repoPath: string | null;
+  repoFullName: string;
+  cloneUrl: string;
   createdAt: string;
-  goal: string;
-  state: string;
-  nextMove: string;
-  why: string;
-  briefingUpdatedAt: string;
 }
 
-export interface Briefing {
-  goal: string;
-  state: string;
-  nextMove: string;
-  why: string;
+// ── Repos (GitHub × D1 merged for the picker) ───────────────────────
+
+/** A repo on the user's GitHub account, plus the D1 isProject overlay. */
+export interface RepoListItem {
+  name: string;
+  fullName: string;
+  description: string | null;
+  cloneUrl: string;
+  htmlUrl: string;
+  defaultBranch: string;
+  isPrivate: boolean;
   updatedAt: string;
+  isProject: boolean;
+  projectId: string | null; // populated when isProject is true
 }
+
+// ── Claim / create-new responses ────────────────────────────────────
+
+export interface ClaimResult {
+  projectId: string;
+  repoFullName: string;
+  cloneUrl: string;
+  isNew: boolean;
+  /** Surfaced as a warning when the scaffold pass failed mid-flight. */
+  scaffoldingError?: string;
+  scaffoldingPartial?: boolean;
+  alreadyHadCeoDirectory?: boolean;
+}
+
+// ── Chats ───────────────────────────────────────────────────────────
 
 export type ChatStatus = "active" | "wrapped";
 
@@ -54,21 +73,10 @@ export interface ChatMessage {
   createdAt: string;
 }
 
-// Returned by GET /api/projects/:id/manager-chat — the canonical manager
-// chat id for this project. Idempotent: repeated calls return the same id.
 export interface ManagerChatResolve {
   chatId: string;
   projectId: string;
   created: boolean;
-}
-
-// ── Dropnotes (v2) ───────────────────────────────────────────────────
-
-export interface Dropnote {
-  id: string;
-  content: string;
-  createdAt: string;
-  archivedAt: string | null;
 }
 
 // ── Claude Code execution ────────────────────────────────────────────
@@ -126,26 +134,33 @@ export interface StreamFailedEvent {
   stage: "workspace" | "execution" | "diff";
 }
 
-// ── Workspaces (v2) ──────────────────────────────────────────────────
+// ── Dropnotes ───────────────────────────────────────────────────────
+
+export interface Dropnote {
+  id: string;
+  content: string;
+  createdAt: string;
+  archivedAt: string | null;
+}
+
+// ── Workspaces (v3) ─────────────────────────────────────────────────
 //
-// A workspace IS a project. There's no longer a "ceo" workspace and no
-// openChats[] within a workspace. The manager chat is the content; we cache
-// its chatId in `managerChatId` so reload restores it without a round-trip.
-// `lastInteractionAt` and `hasUnread` support the LRU-minimize + notification
-// dot semantics for the project dock.
+// A workspace = an open project. `repoFullName` is denormalized into the
+// workspace state (and persisted to localStorage) so panes can render the
+// project name without a round-trip on reload.
 
 export type WorkspaceId = `project:${string}`;
 
 export interface WorkspaceState {
   id: WorkspaceId;
   projectId: string;
-  managerChatId: string | null; // resolved lazily on first open
+  repoFullName: string;
+  managerChatId: string | null;
   minimized: boolean;
-  lastInteractionAt: number; // ms since epoch; LRU sort key
-  hasUnread: boolean; // notification dot — true when activity on minimized
+  lastInteractionAt: number;
+  hasUnread: boolean;
 }
 
-// Helpers used across the frontend.
 export function workspaceIdForProject(projectId: string): WorkspaceId {
   return `project:${projectId}` as WorkspaceId;
 }

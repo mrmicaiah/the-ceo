@@ -1,19 +1,31 @@
-// ManagerDO — one DO per project, addressed by projectId.
+// ManagerDO — one DO per project, addressed by projectId (v3).
 //
-// Every project has exactly one manager. The manager IS the project's chat:
-// brainstorm + critique + draft + dispatch + review, all in one continuous
-// conversation. There's no per-employee identity; the manager is bound to
-// the project's repo via the project context block in its system prompt.
+// Each project's manager is bound to its repo. The system prompt assembly
+// reads .ceo/*.md from the repo (via GitHub API) on each chat turn —
+// briefings table is gone. The directory IS the manager's memory.
 //
-// This replaces v1's EmployeeDO. The dispatch_claude_code worker mechanism
-// is preserved unchanged. Cast and handoff logic is gone — the manager does
-// it all in one chat.
+// Caching: GitHub round-trips are slow; we cache the four .ceo/* file
+// contents in DO storage with a 60s TTL. Run #11 will invalidate the cache
+// on writes; for now the cache simply expires.
 
 import { Env } from "../types";
 import { handleChatTurn, getStateWaitUntil } from "../lib/chat";
 import { MANAGER_SYSTEM_PROMPT } from "../lib/manager";
+import { getRepoFile } from "../lib/github";
 
 const RECENT_UNSEEN_JOB_LIMIT = 10;
+const CEO_CACHE_KEY = "ceo-files-v1";
+const CEO_CACHE_TTL_MS = 60_000;
+
+interface CeoFiles {
+  goal: string | null;
+  context: string | null;
+  decisions: string | null;
+  board: string | null;
+  fetchedAt: number;
+  /** True if every fetch returned 404 — likely the .ceo/ dir is missing. */
+  directoryMissing: boolean;
+}
 
 export class ManagerDO implements DurableObject {
   private state: DurableObjectState;
@@ -44,16 +56,8 @@ export class ManagerDO implements DurableObject {
   }
 
   /**
-   * Resolve (or create) the canonical manager chat for this project. Returns
-   * { chatId } — the single chat row that represents this project's manager
-   * conversation. Idempotent — repeated calls return the same chatId.
-   *
-   * v2 has exactly one chat per project (the manager chat). We pick the
-   * earliest-created chat row for this project as canonical; if none exists,
-   * we mint one. The earliest-created rule survives parallel calls across
-   * devices: if two clients call this simultaneously and both insert, the
-   * next call picks the older row and the system converges. Worst case is
-   * a single orphan row, no data loss.
+   * Resolve (or create) the canonical manager chat for this project.
+   * Idempotent — repeated calls return the same chatId.
    */
   private async resolveManagerChat(request: Request, projectId: string): Promise<Response> {
     if (request.method !== "GET" && request.method !== "POST") {
@@ -73,9 +77,7 @@ export class ManagerDO implements DurableObject {
     }
 
     const chatId = crypto.randomUUID();
-    await this.env.DB.prepare(
-      "INSERT INTO chats (id, project_id) VALUES (?, ?)",
-    )
+    await this.env.DB.prepare("INSERT INTO chats (id, project_id) VALUES (?, ?)")
       .bind(chatId, projectId)
       .run();
     return json({ chatId, projectId, created: true });
@@ -85,9 +87,6 @@ export class ManagerDO implements DurableObject {
    * Handle a chat turn for this project's manager. Body shape:
    *   { chatId?, message }
    * If chatId is omitted, the canonical manager chat is resolved (or created).
-   * The system prompt is built once per turn from MANAGER_SYSTEM_PROMPT plus
-   * a project context block (current project + briefing + unseen worker
-   * results).
    */
   private async handleChat(request: Request, projectId: string): Promise<Response> {
     if (request.method !== "POST") {
@@ -119,7 +118,6 @@ export class ManagerDO implements DurableObject {
     return new Response(resp.body, { status: resp.status, headers });
   }
 
-  /** Inline resolve-or-create for handleChat when no chatId is supplied. */
   private async ensureCanonicalChat(projectId: string): Promise<string> {
     const existing = await this.env.DB.prepare(
       `SELECT id FROM chats
@@ -132,37 +130,36 @@ export class ManagerDO implements DurableObject {
     if (existing) return existing.id;
 
     const chatId = crypto.randomUUID();
-    await this.env.DB.prepare(
-      "INSERT INTO chats (id, project_id) VALUES (?, ?)",
-    )
+    await this.env.DB.prepare("INSERT INTO chats (id, project_id) VALUES (?, ?)")
       .bind(chatId, projectId)
       .run();
     return chatId;
   }
 
   /**
-   * Compose the manager's system prompt. Order:
+   * Compose the manager's system prompt. Layout (v3):
    *   MANAGER_SYSTEM_PROMPT
-   * + Current project line + project ID line
-   * + briefing context (goal/state/nextMove/why if any are set)
+   * + ## Current project: <repo_full_name>
+   * +   Current project ID + Repo url
+   * +   ### Goal     (from .ceo/goal.md, or "(not yet set)")
+   * +   ### Context  (from .ceo/context.md, or "(not yet captured)")
+   * +   ### Recent decisions (from .ceo/decisions.md, or "(none recorded)")
+   * +   ### Board    (from .ceo/board.md, or "(not yet posted)")
    * + recent unseen Claude Code job results (marked seen as a side effect)
    *
-   * If briefing fields are all empty, the briefing block is omitted entirely
-   * rather than printed as a wall of "(not set)". A manager just starting
-   * out on a fresh project doesn't need a stub briefing in the prompt.
+   * If every .ceo/ file 404s, we add a top-level warning before the four
+   * sections noting that the directory may be missing. The manager works
+   * without memory if it has to — we don't fail the turn.
    */
   private async buildSystemPrompt(projectId: string): Promise<string> {
     const project = await this.env.DB.prepare(
-      `SELECT p.id, p.name,
-              b.goal, b.state,
-              b.next_move AS nextMove,
-              b.why
-       FROM projects p
-       LEFT JOIN briefings b ON b.project_id = p.id
-       WHERE p.id = ?`,
+      `SELECT id,
+              repo_full_name AS repoFullName,
+              clone_url AS cloneUrl
+       FROM projects WHERE id = ?`,
     )
       .bind(projectId)
-      .first<{ id: string; name: string; goal: string; state: string; nextMove: string; why: string }>();
+      .first<{ id: string; repoFullName: string; cloneUrl: string }>();
 
     if (!project) {
       // Project doesn't exist (shouldn't happen via normal flow — the route
@@ -171,24 +168,36 @@ export class ManagerDO implements DurableObject {
       return MANAGER_SYSTEM_PROMPT;
     }
 
-    const lines: string[] = [];
-    lines.push("");
-    lines.push("");
-    lines.push(`## Your project`);
-    lines.push("");
-    lines.push(`Current project: ${project.name}`);
-    lines.push(`Current project ID: ${projectId}`);
+    const ceo = await this.loadCeoFiles(project.repoFullName);
 
-    const hasBriefing =
-      (project.goal || project.state || project.nextMove || project.why || "").trim().length > 0;
-    if (hasBriefing) {
+    const lines: string[] = ["", ""];
+    lines.push(`## Current project: ${project.repoFullName}`);
+    lines.push("");
+    lines.push(`Current project ID: ${projectId}`);
+    lines.push(`Repo: ${project.cloneUrl}`);
+
+    if (ceo.directoryMissing) {
       lines.push("");
-      lines.push("Current briefing:");
-      if (project.goal?.trim()) lines.push(`- Goal: ${project.goal.trim()}`);
-      if (project.state?.trim()) lines.push(`- State: ${project.state.trim()}`);
-      if (project.nextMove?.trim()) lines.push(`- Next move: ${project.nextMove.trim()}`);
-      if (project.why?.trim()) lines.push(`- Why: ${project.why.trim()}`);
+      lines.push(
+        "Warning: .ceo/ directory may be missing from this repo. The manager is operating without committed memory until this is restored.",
+      );
     }
+
+    lines.push("");
+    lines.push("### Goal");
+    lines.push(formatCeoSection(ceo.goal, "(not yet set)"));
+
+    lines.push("");
+    lines.push("### Context");
+    lines.push(formatCeoSection(ceo.context, "(not yet captured)"));
+
+    lines.push("");
+    lines.push("### Recent decisions");
+    lines.push(formatCeoSection(ceo.decisions, "(none recorded)"));
+
+    lines.push("");
+    lines.push("### Board");
+    lines.push(formatCeoSection(ceo.board, "(not yet posted)"));
 
     const unseen = await this.loadAndMarkUnseenJobs(projectId);
     if (unseen.length > 0) {
@@ -219,11 +228,64 @@ export class ManagerDO implements DurableObject {
   }
 
   /**
-   * Read any execution_jobs on this project whose status is terminal and
-   * which the manager hasn't seen yet (manager_seen_at IS NULL). Mark them
-   * seen in the same transaction so the next prompt build doesn't re-surface
-   * them. This is the same mechanism v1 used (under the dex_seen_at name);
-   * column was renamed during the v2 migration.
+   * Read the four .ceo/ files for this repo, with a 60s DO-storage cache.
+   * We fetch them in parallel via getRepoFile (which uses the repo's default
+   * branch when no ref is passed — that sidesteps storing default_branch on
+   * the project row).
+   *
+   * Missing files (404 from GitHub) are surfaced as null in the cached
+   * record; the rendering layer turns them into per-file placeholders. If
+   * all four are null, the rendering adds a top-level directory-missing
+   * warning.
+   *
+   * Errors that aren't 404 (e.g., 500 from GitHub, rate limit) propagate
+   * as null reads with a degraded prompt; we explicitly don't throw —
+   * better to give the manager a memory-less turn than to crash the chat.
+   */
+  private async loadCeoFiles(repoFullName: string): Promise<CeoFiles> {
+    const cached = await this.state.storage.get<CeoFiles>(CEO_CACHE_KEY);
+    if (cached && Date.now() - cached.fetchedAt < CEO_CACHE_TTL_MS) {
+      return cached;
+    }
+
+    if (!this.env.GITHUB_TOKEN) {
+      // No GitHub token — degrade gracefully.
+      const empty: CeoFiles = {
+        goal: null,
+        context: null,
+        decisions: null,
+        board: null,
+        fetchedAt: Date.now(),
+        directoryMissing: true,
+      };
+      await this.state.storage.put(CEO_CACHE_KEY, empty);
+      return empty;
+    }
+
+    const token = this.env.GITHUB_TOKEN;
+    const [goal, context, decisions, board] = await Promise.all([
+      safeGetFile(token, repoFullName, ".ceo/goal.md"),
+      safeGetFile(token, repoFullName, ".ceo/context.md"),
+      safeGetFile(token, repoFullName, ".ceo/decisions.md"),
+      safeGetFile(token, repoFullName, ".ceo/board.md"),
+    ]);
+
+    const fresh: CeoFiles = {
+      goal,
+      context,
+      decisions,
+      board,
+      fetchedAt: Date.now(),
+      directoryMissing: goal === null && context === null && decisions === null && board === null,
+    };
+    await this.state.storage.put(CEO_CACHE_KEY, fresh);
+    return fresh;
+  }
+
+  /**
+   * Dex-style helper preserved from run #9 with the v2 rename. Return any
+   * execution_jobs in terminal status that the manager hasn't reviewed
+   * (manager_seen_at IS NULL); mark them seen as a side effect.
    */
   private async loadAndMarkUnseenJobs(projectId: string): Promise<
     Array<{
@@ -238,10 +300,7 @@ export class ManagerDO implements DurableObject {
     }>
   > {
     const { results } = await this.env.DB.prepare(
-      `SELECT id AS jobId,
-              summary,
-              status,
-              diff_summary AS diffSummaryRaw
+      `SELECT id AS jobId, summary, status, diff_summary AS diffSummaryRaw
        FROM execution_jobs
        WHERE project_id = ?
          AND status IN ('completed', 'failed')
@@ -250,12 +309,7 @@ export class ManagerDO implements DurableObject {
        LIMIT ?`,
     )
       .bind(projectId, RECENT_UNSEEN_JOB_LIMIT)
-      .all<{
-        jobId: string;
-        summary: string;
-        status: string;
-        diffSummaryRaw: string | null;
-      }>();
+      .all<{ jobId: string; summary: string; status: string; diffSummaryRaw: string | null }>();
 
     if (results.length === 0) return [];
 
@@ -301,6 +355,30 @@ export class ManagerDO implements DurableObject {
       .run();
 
     return parsed;
+  }
+}
+
+/** Render a .ceo/ file's content into the prompt, or its placeholder. */
+function formatCeoSection(content: string | null, placeholder: string): string {
+  if (!content) return placeholder;
+  const trimmed = content.trim();
+  return trimmed.length === 0 ? placeholder : trimmed;
+}
+
+/** Read a .ceo/ file; turn any error (404 or otherwise) into null. */
+async function safeGetFile(
+  token: string,
+  fullName: string,
+  path: string,
+): Promise<string | null> {
+  try {
+    const file = await getRepoFile(token, fullName, path);
+    return file ? file.content : null;
+  } catch (err) {
+    console.error(
+      `[manager] failed to fetch ${fullName}/${path}: ${(err as Error).message}`,
+    );
+    return null;
   }
 }
 

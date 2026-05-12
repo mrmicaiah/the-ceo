@@ -1,19 +1,36 @@
-// Top bar — the project dock. Full width, spans across.
+// Top bar — the project dock + the v3 picker.
 //
 // Tabs:
-//   - Each open project is a tab. Visible (in the grid) = ink text;
-//     minimized = muted with a notification dot when activity has occurred.
-//   - The active project gets a 1px accent left-edge bar.
-//   - Hover reveals a small × to close the project from the workspace.
-//   - Click switches/restores; click while already active is a no-op.
+//   - Each open project is a tab. Active = ink + 1px accent left-edge bar.
+//   - Inactive open = ink, no bar. Minimized = muted with notification dot
+//     when activity occurred while minimized.
+//   - Hover reveals × to close from the dock.
 //
-// + button on the right end opens a small project picker dropdown — lists
-// projects not currently in the dock. Click one to open it.
+// + button opens the v3 picker — a two-section dropdown:
+//
+//   YOUR PROJECTS  (claimed repos: isProject === true)
+//   ─────────────
+//   the-ceo
+//   refervo-app
+//
+//   OTHER REPOS  (unclaimed repos: isProject === false)
+//   ─────────────
+//   some-other-repo                       Make this a project →
+//   another-experiment                    Make this a project →
+//
+//   ─────────────
+//   + New project
+//
+// Clicking a "Your projects" row opens the workspace. Clicking
+// "Make this a project →" on an "Other repos" row calls /api/projects/from-repo
+// then opens the workspace. The + New project footer opens NewProjectModal.
 
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { claimRepoAsProject, listRepos } from "../lib/api";
 import { useStore } from "../state/store";
-import type { ProjectListItem, WorkspaceState } from "../types";
+import type { RepoListItem, WorkspaceState } from "../types";
+import { NewProjectModal } from "./NewProjectModal";
 
 export function ProjectTopBar() {
   const {
@@ -24,6 +41,7 @@ export function ProjectTopBar() {
     restoreProject,
   } = useStore();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [newModalOpen, setNewModalOpen] = useState(false);
 
   const onTabClick = (ws: WorkspaceState) => {
     if (ws.minimized) {
@@ -34,53 +52,56 @@ export function ProjectTopBar() {
   };
 
   return (
-    <div className="shrink-0 flex items-stretch border-b border-divider bg-bg overflow-x-auto">
-      {state.workspaces.length === 0 ? (
-        <div className="flex-1 px-6 py-2 text-[12px] text-muted italic">
-          No projects open.
+    <>
+      <div className="shrink-0 flex items-stretch border-b border-divider bg-bg overflow-x-auto">
+        {state.workspaces.length === 0 ? (
+          <div className="flex-1 px-6 py-2 text-[12px] text-muted italic">
+            No projects open.
+          </div>
+        ) : (
+          <div className="flex items-stretch">
+            {state.workspaces.map((ws) => (
+              <ProjectTab
+                key={ws.id}
+                ws={ws}
+                isActive={state.activeWorkspaceId === ws.id}
+                projectName={ws.repoFullName}
+                onClick={() => onTabClick(ws)}
+                onClose={() => closeProject(ws.projectId)}
+              />
+            ))}
+            <div className="flex-1" />
+          </div>
+        )}
+        <div className="relative ml-auto shrink-0 flex items-center">
+          <button
+            onClick={() => setPickerOpen((v) => !v)}
+            className="px-4 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            aria-label="Open a project"
+            title="Open a project"
+          >
+            +
+          </button>
+          <AnimatePresence>
+            {pickerOpen && (
+              <ProjectPicker
+                openProjectIds={new Set(state.workspaces.map((w) => w.projectId))}
+                onPick={(id, repoFullName) => {
+                  openProject(id, repoFullName);
+                  setPickerOpen(false);
+                }}
+                onNewProject={() => {
+                  setPickerOpen(false);
+                  setNewModalOpen(true);
+                }}
+                onClose={() => setPickerOpen(false)}
+              />
+            )}
+          </AnimatePresence>
         </div>
-      ) : (
-        <div className="flex items-stretch">
-          {state.workspaces.map((ws) => (
-            <ProjectTab
-              key={ws.id}
-              ws={ws}
-              isActive={state.activeWorkspaceId === ws.id}
-              projectName={
-                state.projects.find((p) => p.id === ws.projectId)?.name ??
-                "(loading…)"
-              }
-              onClick={() => onTabClick(ws)}
-              onClose={() => closeProject(ws.projectId)}
-            />
-          ))}
-          <div className="flex-1" />
-        </div>
-      )}
-      <div className="relative ml-auto shrink-0 flex items-center">
-        <button
-          onClick={() => setPickerOpen((v) => !v)}
-          className="px-4 py-2 text-[13px] text-muted hover:text-ink transition-colors"
-          aria-label="Open a project"
-          title="Open a project"
-        >
-          +
-        </button>
-        <AnimatePresence>
-          {pickerOpen && (
-            <ProjectPicker
-              projects={state.projects}
-              openProjectIds={new Set(state.workspaces.map((w) => w.projectId))}
-              onPick={(id) => {
-                openProject(id);
-                setPickerOpen(false);
-              }}
-              onClose={() => setPickerOpen(false)}
-            />
-          )}
-        </AnimatePresence>
       </div>
-    </div>
+      <NewProjectModal open={newModalOpen} onClose={() => setNewModalOpen(false)} />
+    </>
   );
 }
 
@@ -141,16 +162,36 @@ function ProjectTab({ ws, isActive, projectName, onClick, onClose }: TabProps) {
   );
 }
 
+// ── Picker ──────────────────────────────────────────────────────────
+
 interface PickerProps {
-  projects: ProjectListItem[];
   openProjectIds: Set<string>;
-  onPick: (id: string) => void;
+  onPick: (projectId: string, repoFullName: string) => void;
+  onNewProject: () => void;
   onClose: () => void;
 }
 
-function ProjectPicker({ projects, openProjectIds, onPick, onClose }: PickerProps) {
-  // Close on outside click.
+function ProjectPicker({ openProjectIds, onPick, onNewProject, onClose }: PickerProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const [repos, setRepos] = useState<RepoListItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [claiming, setClaiming] = useState<string | null>(null);
+
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      try {
+        const list = await listRepos();
+        if (!canceled) setRepos(list);
+      } catch (err) {
+        if (!canceled) setError((err as Error).message);
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -159,7 +200,27 @@ function ProjectPicker({ projects, openProjectIds, onPick, onClose }: PickerProp
     return () => document.removeEventListener("mousedown", onDoc);
   }, [onClose]);
 
-  const available = projects.filter((p) => !openProjectIds.has(p.id));
+  const onClaimAndOpen = async (repo: RepoListItem) => {
+    if (claiming) return;
+    setClaiming(repo.fullName);
+    setError(null);
+    try {
+      const result = await claimRepoAsProject({
+        repoFullName: repo.fullName,
+        cloneUrl: repo.cloneUrl,
+        defaultBranch: repo.defaultBranch,
+      });
+      onPick(result.projectId, result.repoFullName);
+    } catch (err) {
+      setError((err as Error).message);
+      setClaiming(null);
+    }
+  };
+
+  const claimed = (repos ?? []).filter(
+    (r) => r.isProject && !openProjectIds.has(r.projectId ?? ""),
+  );
+  const unclaimed = (repos ?? []).filter((r) => !r.isProject);
 
   return (
     <motion.div
@@ -168,37 +229,98 @@ function ProjectPicker({ projects, openProjectIds, onPick, onClose }: PickerProp
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4 }}
       transition={{ duration: 0.15 }}
-      className="absolute top-full right-0 mt-1 min-w-[260px] max-h-[60vh] overflow-y-auto bg-bg border border-divider rounded-sm shadow-md z-20"
+      className="absolute top-full right-0 mt-1 w-[360px] max-h-[70vh] overflow-y-auto bg-bg border border-divider rounded-sm shadow-md z-20"
     >
-      {projects.length === 0 ? (
-        <div className="px-4 py-3 text-[12px] text-muted italic">
-          No projects yet.
+      {error ? (
+        <div className="px-4 py-3 text-[12px] text-muted">{error}</div>
+      ) : repos === null ? (
+        <div className="px-4 py-3 text-[12px] text-muted italic editorial-shimmer">
+          loading repos from GitHub
         </div>
-      ) : available.length === 0 ? (
+      ) : repos.length === 0 ? (
         <div className="px-4 py-3 text-[12px] text-muted italic">
-          All projects are already open.
+          No repos found on your GitHub account. Create one to get started.
         </div>
       ) : (
-        <ul>
-          {available.map((p) => (
-            <li key={p.id}>
-              <button
-                onClick={() => onPick(p.id)}
-                className="w-full text-left px-4 py-2 hover:bg-surface/40 transition-colors"
-              >
-                <div className="font-display text-[14px] text-ink truncate">
-                  {p.name}
-                </div>
-                {p.goal && (
-                  <div className="text-[11px] text-muted truncate">
-                    {p.goal}
+        <>
+          <SectionHeader>Your projects</SectionHeader>
+          {claimed.length === 0 ? (
+            <div className="px-4 py-2 text-[12px] text-muted italic">
+              No projects yet — claim a repo below.
+            </div>
+          ) : (
+            <ul>
+              {claimed.map((r) => (
+                <li key={r.fullName}>
+                  <button
+                    onClick={() => r.projectId && onPick(r.projectId, r.fullName)}
+                    className="w-full text-left px-4 py-2 hover:bg-surface/40 transition-colors"
+                  >
+                    <div className="font-display text-[14px] text-ink truncate">
+                      {r.fullName}
+                    </div>
+                    {r.description && (
+                      <div className="text-[11px] text-muted truncate">
+                        {r.description}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <SectionHeader>Other repos</SectionHeader>
+          {unclaimed.length === 0 ? (
+            <div className="px-4 py-2 text-[12px] text-muted italic">
+              All repos already claimed.
+            </div>
+          ) : (
+            <ul>
+              {unclaimed.map((r) => (
+                <li key={r.fullName} className="group flex items-center">
+                  <div className="flex-1 px-4 py-2 min-w-0">
+                    <div className="font-display text-[14px] text-ink truncate">
+                      {r.fullName}
+                    </div>
+                    {r.description && (
+                      <div className="text-[11px] text-muted truncate">
+                        {r.description}
+                      </div>
+                    )}
                   </div>
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
+                  <button
+                    onClick={() => onClaimAndOpen(r)}
+                    disabled={claiming === r.fullName}
+                    className="shrink-0 pr-4 text-[12px] text-accent hover:underline underline-offset-2 disabled:opacity-50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                  >
+                    {claiming === r.fullName
+                      ? "claiming…"
+                      : "Make this a project →"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="border-t border-divider mt-1">
+            <button
+              onClick={onNewProject}
+              className="w-full text-left px-4 py-3 text-[13px] text-accent hover:underline underline-offset-2"
+            >
+              + New project
+            </button>
+          </div>
+        </>
       )}
     </motion.div>
+  );
+}
+
+function SectionHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-[0.16em] text-muted border-t border-divider first:border-t-0">
+      {children}
+    </div>
   );
 }

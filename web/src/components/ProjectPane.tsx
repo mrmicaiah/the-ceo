@@ -1,18 +1,15 @@
-// A single project pane in the workspace grid. v2: each pane is one
-// project's manager chat. The pane header carries the project name and
-// minimize/close buttons; the body is the manager's ChatView.
+// A single project pane in the workspace grid. v3: each pane is one
+// project's manager chat. The pane header carries the repo full-name
+// (denormalized into workspace state at claim time) and minimize/close
+// buttons; the body is the manager's ChatView.
 //
-// The pane is responsible for resolving (or fetching) the manager chatId
-// for its project. We store the chatId in workspace state so a reload
-// doesn't need to round-trip again. The "resolving" state is brief —
-// shown once on first open of a project; subsequent renders use the cached
-// id immediately.
+// On mount, if `managerChatId` isn't yet cached in workspace state, the
+// pane resolves the canonical manager chat via the API and caches it.
 
 import { useEffect, useState } from "react";
 import { resolveManagerChat } from "../lib/api";
 import { useStore } from "../state/store";
 import { ChatView } from "./ChatView";
-import type { ProjectListItem } from "../types";
 
 interface Props {
   projectId: string;
@@ -31,10 +28,9 @@ export function ProjectPane({ projectId, className }: Props) {
   } = useStore();
 
   const workspace = state.workspaces.find((w) => w.projectId === projectId);
-  const project: ProjectListItem | undefined = state.projects.find(
-    (p) => p.id === projectId,
-  );
   const chatId = workspace?.managerChatId ?? null;
+  const repoFullName = workspace?.repoFullName ?? "(loading…)";
+  const isActive = state.activeWorkspaceId === workspace?.id;
 
   const [resolving, setResolving] = useState<string | null>(null);
   useEffect(() => {
@@ -55,9 +51,6 @@ export function ProjectPane({ projectId, className }: Props) {
     };
   }, [chatId, projectId, setManagerChatId]);
 
-  const projectName = project?.name ?? "(loading…)";
-  const isActive = state.activeWorkspaceId === workspace?.id;
-
   return (
     <div
       className={`flex flex-col min-w-0 min-h-0 overflow-hidden bg-bg ${className ?? ""}`}
@@ -72,7 +65,7 @@ export function ProjectPane({ projectId, className }: Props) {
           />
         )}
         <div className="font-display text-[15px] text-ink tracking-tight truncate">
-          {projectName}
+          {repoFullName}
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -102,8 +95,6 @@ export function ProjectPane({ projectId, className }: Props) {
             chatId={chatId}
             onInteraction={() => touchProject(projectId)}
             onActivity={() => {
-              // If this pane isn't currently active, flag unread on its
-              // (possibly-minimized) workspace.
               if (!isActive) markUnread(projectId);
             }}
           />

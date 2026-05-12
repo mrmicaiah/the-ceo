@@ -1,30 +1,34 @@
 # The CEO
 
-A thinking layer that sits on top of Claude Code and the projects you actually work on.
+A repo-bound manager for each of your projects. You claim repos as projects from your GitHub account. The manager reads the `.ceo/` directory in each repo, dispatches Claude Code workers when execution is needed, and walks in caught up each session because its memory is committed to git.
 
 ---
 
 ## What it is
 
-Each project is a repo. Each project has a **manager** — one AI thread bound to that repo, working with you across the full breadth of project work: brainstorming, critiquing, drafting, dispatching workers, reviewing what comes back. Not a roster of specialists; one role that shifts mode in conversation, the way a real colleague would.
+The project list is your GitHub account. Every repo is a potential project. When you claim one — either an existing repo or a freshly-created one — the system commits a `.ceo/` directory to it. That directory is the manager's persistent memory:
+
+- `.ceo/goal.md` — what this project is for, in your words
+- `.ceo/context.md` — what the manager needs to know to be useful
+- `.ceo/decisions.md` — log of significant decisions over the life of the project
+- `.ceo/board.md` — current state at a glance, updated by the manager
+- `.ceo/README.md` — explains the directory to humans (and other tools) reading the repo
+
+The manager reads these on every session. If the system disappeared, the project's memory would survive in the repo.
 
 When real code needs to be written, the manager drafts a Claude Code prompt and dispatches a worker to **Claude Code running locally on your machine**. You click to authorize; the worker runs; output streams back into the conversation. You stay in the loop. The system holds the context.
 
-Alongside the per-project managers: a **dropnote box** at the bottom of the screen for stray-thought capture, and (coming in later runs) a **Brainstorm Room** with two brains for cross-project thought and a **Board** for persistent visual workspace.
+Alongside the per-project managers: a **dropnote box** at the bottom of the screen for stray-thought capture. The **Brainstorm Room** and **Board** surfaces are coming in later runs.
 
 ## The principle
 
-Tasks are dead. Managers are alive — they hold context, make judgment calls, remember why things exist. The bright line: **only you change state on your work.** Managers can think, brainstorm, research, draft, review, recommend — but they cannot push code, commit, or make destructive changes without your explicit click on a confirm-affordance.
-
-## v1 / v2
-
-The current codebase is v2. The original v1 design (CEO chief-of-staff + four named specialists Nora, Iris, Theo, Dex) has been retired. The v2 spec lives in [`docs/design-v2.md`](docs/design-v2.md). v1 docs ([`vision.md`](docs/vision.md), [`employees.md`](docs/employees.md), [`data-model.md`](docs/data-model.md), [`v0-scope.md`](docs/v0-scope.md)) are kept as historical reference; some principles carry forward, but the architecture has changed.
+Tasks are dead. Managers are alive — they hold context, make judgment calls, remember why things exist. The bright line: **only you change state on your work.** The manager can think, brainstorm, research, draft, review, recommend — but it cannot push code, commit, or make destructive changes without your explicit click. The one exception: when you claim a repo, the system commits the initial `.ceo/` scaffold on your behalf — that commit IS initiated by your click on "Make this a project →".
 
 ## Architecture (one paragraph)
 
-Cloudflare Workers + Durable Objects + D1 hold the system. Per project there is one `ManagerDO` (addressed by project UUID) and one `ProjectDO` (holding the project's briefing). A single `AgentHubDO` owns the websocket to the local agent. A React + Vite frontend bundles to static assets the Worker serves. A small Node process on your Mac/PC listens for execution requests and runs Claude Code against your repos. Reports flow up; attention flows down.
+Cloudflare Workers + Durable Objects + D1 hold the operational shell. Per claimed project there's one `ManagerDO` (addressed by project UUID) holding the chat plumbing and a small DO-storage cache of the project's `.ceo/*.md` contents. A single `AgentHubDO` owns the websocket to the local agent. A React + Vite frontend bundles to static assets the Worker serves. A small Node process on your Mac/PC listens for execution requests and runs Claude Code against your repos. **The repo's `.ceo/` directory is the source of truth for the project's substance**; D1 is operational cache.
 
-Full details in [`docs/architecture.md`](docs/architecture.md). v2-specific design in [`docs/design-v2.md`](docs/design-v2.md).
+Full v2 spec in [`docs/design-v2.md`](docs/design-v2.md).
 
 ## Local development
 
@@ -45,8 +49,8 @@ AGENT_TOKEN=…
 ```
 
 - `ANTHROPIC_API_KEY` — required. Every manager chat call uses it.
-- `AUTH_TOKEN` — required. Bearer token gating `/api/*`. Must match `VITE_AUTH_TOKEN` baked into the frontend at build time.
-- `GITHUB_TOKEN` — required only for the `create_repo` action. GitHub PAT with `repo` scope.
+- `AUTH_TOKEN` — required. Bearer token gating `/api/*`. Must match `VITE_AUTH_TOKEN` in `web/.env`.
+- `GITHUB_TOKEN` — **required in v3.** The project picker reads your GitHub repos directly; without this token the picker can't enumerate anything. Use a PAT with `repo` scope (classic) or a fine-grained token with **Contents: write** + **Administration: write** + **Metadata: read** on the repos you'll use as projects.
 - `AGENT_TOKEN` — required only for the local agent. Bearer token the agent presents on `/api/agent/ws`.
 
 Run both the Worker and the Vite dev server:
@@ -56,13 +60,9 @@ npm run dev
 ```
 
 - Worker on `http://localhost:8787` (handles `/api/*` and `/health`)
-- Vite dev server on `http://localhost:5173` (serves the React app, proxies `/api/*` to the Worker)
+- Vite dev server on `http://localhost:5173`
 
 Open `http://localhost:5173`.
-
-`.dev.vars` must be UTF-8 with no BOM (`head -c 3 .dev.vars | xxd` — first byte `41` for `A`, not `ef bb bf` or `ff fe`).
-
-Wrangler dev caches `.dev.vars` on first request. After editing, `touch src/index.ts` to force a code reload.
 
 ## The local agent
 
@@ -70,34 +70,34 @@ When the manager emits a `dispatch_claude_code` block and you click "Run Claude 
 
 ```bash
 cd agent
-cp .env.example .env       # edit: AGENT_TOKEN, WORKER_URL, REPOS_DIR, ANTHROPIC_API_KEY
+cp .env.example .env       # AGENT_TOKEN, WORKER_URL, REPOS_DIR, ANTHROPIC_API_KEY
 npm install
 npm start
 ```
 
-Full agent docs in [`agent/README.md`](agent/README.md). Without the agent running, dispatches queue indefinitely until the agent connects and flushes them.
+Full agent docs in [`agent/README.md`](agent/README.md).
 
 ## Remote D1 migrations
 
 Schema in [`src/db/schema.sql`](src/db/schema.sql). Migration files in [`src/db/migrations/`](src/db/migrations/).
 
-### v2 rebuild (run #9)
+### v3 rebuild (run #10)
 
-Wipes v1 conversation state, drops the per-employee notes table, renames `execution_jobs.dex_seen_at` → `manager_seen_at`, and creates the `dropnotes` table. Apply once after pulling this run:
+**Wipes all v2 projects, chats, messages, briefings, and execution_jobs.** Drops the `briefings` table entirely (the manager reads `.ceo/*.md` instead). Reshapes `projects` to four columns: `(id, repo_full_name, clone_url, created_at)`. The `dropnotes` table and its contents are preserved.
 
 ```bash
 # Local
-npx wrangler d1 execute the-ceo-db --local --file=src/db/migrations/v2-rebuild.sql
+npx wrangler d1 execute the-ceo-db --local --file=src/db/migrations/v3-repos-as-projects.sql
 
-# Remote
-npx wrangler d1 execute the-ceo-db --remote --file=src/db/migrations/v2-rebuild.sql
+# Remote (this is the destructive one — production data goes)
+npx wrangler d1 execute the-ceo-db --remote --file=src/db/migrations/v3-repos-as-projects.sql
 ```
 
-The migration is non-idempotent on the `ALTER TABLE RENAME COLUMN` step. Apply once per environment.
+If `--file` mode hits an authentication error against `/d1/database/{id}/import` (some OAuth-token scopes don't cover that endpoint), run the statements one at a time via `--command` instead. The migration file's statements are listed in order and each is independently idempotent on a freshly-wiped DB.
 
-### v1 history (kept for reference)
+### v2 rebuild (run #9, historical)
 
-Earlier runs added `clone_url` to `projects` and `summary` / `dex_seen_at` to `execution_jobs`. The v2 migration above subsumes the seen-marker rename; `clone_url` and `summary` are untouched.
+Run #9's migration: `src/db/migrations/v2-rebuild.sql`. Applied previously to local + remote; included here for reference.
 
 ## Deployment
 
@@ -118,9 +118,10 @@ npx wrangler secret put AGENT_TOKEN
 
 ## Documents
 
-- [`docs/design-v2.md`](docs/design-v2.md) — **v2 spec of record** (current architecture)
-- [`docs/architecture.md`](docs/architecture.md) — Technical shape
-- [`docs/design.md`](docs/design.md) — Visual and experiential specification (carries forward to v2)
+- [`docs/design-v2.md`](docs/design-v2.md) — **v2 spec of record** (current architecture; v3 evolution captured in the data-model section)
+- [`docs/runs/run-10-prompt.md`](docs/runs/run-10-prompt.md) — Run #10 spec (this run)
+- [`docs/runs/run-10-scaffold-content.md`](docs/runs/run-10-scaffold-content.md) — Verbatim SQL and `.ceo/` starter file contents
+- [`docs/design.md`](docs/design.md) — Visual and experiential specification (carries forward)
 - [`docs/vision.md`](docs/vision.md) — v1 vision (historical; principles carry, architecture changed)
 - [`docs/employees.md`](docs/employees.md) — v1 staff roster (historical)
 - [`docs/data-model.md`](docs/data-model.md) — v1 data model (historical)

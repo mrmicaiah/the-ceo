@@ -17,13 +17,11 @@ binding = "DB"
 database_name = "the-ceo-db"
 database_id = "4e2918b0-6ac0-4a1e-b865-0aa7962d2e8e"
 
-# Durable Objects (v2)
-#   PROJECT_DO     — per-project metadata (briefings)
-#   MANAGER_DO     — per-project manager chat (renamed from v1's EmployeeDO)
-#   AGENT_HUB_DO   — single instance, owns the agent websocket
+# Durable Objects (v3)
+#   MANAGER_DO     — per-project manager chat (idFromName(projectId))
+#   AGENT_HUB_DO   — single instance, owns the local-agent websocket
 [durable_objects]
 bindings = [
-  { name = "PROJECT_DO", class_name = "ProjectDO" },
   { name = "MANAGER_DO", class_name = "ManagerDO" },
   { name = "AGENT_HUB_DO", class_name = "AgentHubDO" },
 ]
@@ -37,11 +35,17 @@ new_classes = ["CeoDO", "ProjectDO", "EmployeeDO"]
 tag = "v2"
 new_classes = ["AgentHubDO"]
 
-# v2-rebuild migration (run #9): the CEO surface is retired, and the
-# per-employee DO becomes per-project as ManagerDO.
+# Run #9: retired CeoDO, renamed EmployeeDO → ManagerDO.
 [[migrations]]
 tag = "v3-v2-rebuild"
 deleted_classes = ["CeoDO"]
 renamed_classes = [
   { from = "EmployeeDO", to = "ManagerDO" },
 ]
+
+# Run #10: ProjectDO retires — its only routes (/briefing, /briefing-update)
+# were tied to the briefings table, which is dropped in this run. Briefings
+# moved to .ceo/*.md files in each repo; the manager reads them directly.
+[[migrations]]
+tag = "v4-projects-retire"
+deleted_classes = ["ProjectDO"]

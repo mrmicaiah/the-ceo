@@ -1,60 +1,26 @@
-// Unified parser for every fenced action block the manager emits.
+// Parser for fenced action blocks the manager emits.
 //
-// v2 action languages and their shapes:
-//   - create_project       (forward-compatible; no v2 emitter yet)
-//   - rename_project       (forward-compatible; no v2 emitter yet)
-//   - update_briefing      (forward-compatible; no v2 emitter yet)
-//   - create_repo          (forward-compatible; no v2 emitter yet)
-//   - dispatch_claude_code (manager — multi-line prompt via YAML pipe)
-//
-// v1 retirements: `cast` and `handoff` — gone. One manager per project; no
-// per-employee identity left in the system. The remaining four non-dispatch
-// languages are parsed defensively so a future v2 surface (Brainstorm Room,
-// Board, manager-emitted briefing edits) can light them up without a parser
-// migration.
+// v3 (run #10): the manager has one action available — `dispatch_claude_code`.
+// The other v1/v2 action types (cast, handoff, create_project, rename_project,
+// update_briefing, create_repo) are gone:
+//   - cast / handoff: retired in run #9
+//   - create_project: now a UI flow (NewProjectModal); the manager doesn't
+//     emit project-creation actions
+//   - update_briefing: briefings table retired in run #10
+//   - rename_project: project name = repo_full_name; no rename to do
+//   - create_repo: folded into /api/projects/new
 //
 // Returns null on any malformed input. Callers fall back to rendering the
 // original text as a regular code block.
 
-export type BriefingField = "goal" | "state" | "nextMove" | "why";
-
-export type ParsedAction =
-  | {
-      type: "create_project";
-      name: string;
-      initialGoal: string;
-      reason: string;
-    }
-  | {
-      type: "rename_project";
-      project: string;
-      newName: string;
-    }
-  | {
-      type: "update_briefing";
-      project: string;
-      field: BriefingField;
-      value: string;
-    }
-  | {
-      type: "create_repo";
-      project: string | undefined;
-      name: string;
-      description: string;
-      isPrivate: boolean;
-    }
-  | {
-      type: "dispatch_claude_code";
-      project: string;
-      summary: string;
-      prompt: string;
-    };
+export type ParsedAction = {
+  type: "dispatch_claude_code";
+  project: string;
+  summary: string;
+  prompt: string;
+};
 
 export const ACTION_LANGS: ReadonlySet<string> = new Set([
-  "create_project",
-  "rename_project",
-  "update_briefing",
-  "create_repo",
   "dispatch_claude_code",
 ]);
 
@@ -64,14 +30,6 @@ export function parseActionBlock(
 ): ParsedAction | null {
   const fields = parseFields(content);
   switch (language) {
-    case "create_project":
-      return parseCreateProject(fields);
-    case "rename_project":
-      return parseRenameProject(fields);
-    case "update_briefing":
-      return parseUpdateBriefing(fields);
-    case "create_repo":
-      return parseCreateRepo(fields);
     case "dispatch_claude_code":
       return parseDispatchClaudeCode(fields);
     default:
@@ -81,18 +39,7 @@ export function parseActionBlock(
 
 /** A stable id derived from an action's content — used to dedup auto-fires. */
 export function actionId(action: ParsedAction): string {
-  switch (action.type) {
-    case "create_project":
-      return `create_project:${action.name}`;
-    case "rename_project":
-      return `rename_project:${action.project}:${action.newName}`;
-    case "update_briefing":
-      return `update_briefing:${action.project}:${action.field}:${action.value}`;
-    case "create_repo":
-      return `create_repo:${action.project ?? "_"}:${action.name}`;
-    case "dispatch_claude_code":
-      return `dispatch_claude_code:${action.project}:${action.summary}`;
-  }
+  return `dispatch_claude_code:${action.project}:${action.summary}`;
 }
 
 // ── Internals ──────────────────────────────────────────────────────────
@@ -160,56 +107,6 @@ function parseFields(content: string): Record<string, string> {
     }
   }
   return fields;
-}
-
-function parseCreateProject(f: Record<string, string>): ParsedAction | null {
-  if (!f.name || !f.initial_goal || !f.reason) return null;
-  return {
-    type: "create_project",
-    name: f.name,
-    initialGoal: f.initial_goal,
-    reason: f.reason,
-  };
-}
-
-function parseRenameProject(f: Record<string, string>): ParsedAction | null {
-  if (!f.project || !f.new_name) return null;
-  return {
-    type: "rename_project",
-    project: f.project,
-    newName: f.new_name,
-  };
-}
-
-const VALID_BRIEFING_FIELDS: ReadonlySet<string> = new Set<BriefingField>([
-  "goal",
-  "state",
-  "nextMove",
-  "why",
-]);
-
-function parseUpdateBriefing(f: Record<string, string>): ParsedAction | null {
-  if (!f.project || !f.field || !f.value) return null;
-  const fieldNorm = f.field === "next_move" ? "nextMove" : f.field;
-  if (!VALID_BRIEFING_FIELDS.has(fieldNorm)) return null;
-  return {
-    type: "update_briefing",
-    project: f.project,
-    field: fieldNorm as BriefingField,
-    value: f.value,
-  };
-}
-
-function parseCreateRepo(f: Record<string, string>): ParsedAction | null {
-  if (!f.name) return null;
-  const isPrivate = (f.private?.toLowerCase() ?? "true") !== "false";
-  return {
-    type: "create_repo",
-    project: f.project,
-    name: f.name,
-    description: f.description ?? "",
-    isPrivate,
-  };
 }
 
 function parseDispatchClaudeCode(f: Record<string, string>): ParsedAction | null {

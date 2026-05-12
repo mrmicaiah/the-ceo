@@ -210,21 +210,28 @@ Workers report back to their spawning manager. The manager digests the result an
 
 Every project's identity and persistent memory lives in the repo:
 
-- The repo itself is the project (name, structure, code)
-- `.ceo/goal.md`, `.ceo/context.md`, etc. are the manager's committed memory
+- The repo itself is the project (name, structure, code, history)
+- `.ceo/README.md` — explains the directory to anyone reading the repo
+- `.ceo/goal.md` — what the project is for, in the user's words
+- `.ceo/context.md` — what the manager needs to know to be useful here
+- `.ceo/decisions.md` — log of significant decisions with dates and reasoning
+- `.ceo/board.md` — the project's current state at a glance, updated by the manager
 - Commit history of the `.ceo/` files is the audit trail
 
-### Operational cache: The system's database
+The repo is the source of truth for the project's substance. Everything else is operational cache.
 
-The system maintains an operational layer for things that aren't naturally git-shaped:
+### Operational cache: D1
 
-- Chat histories (per manager, per brainstorm session)
-- Dropnote box contents
-- The active Board snapshot (synced from repos)
-- Worker job state (in-flight, queued, completed)
-- User-level state (preferences, last session info)
+The system maintains a minimal operational layer for things that aren't naturally git-shaped:
 
-If the operational database were lost, the system's *memory* of the projects would survive in the repos. Only operational and conversational state would be lost.
+- `projects` — one row per claimed repo: `(id, repo_full_name, clone_url, created_at)`. The minimum tuple needed for chats and worker dispatch to function. **Nothing substantive lives here.**
+- `chats` and `messages` — the manager's conversation per project. Ephemeral in spirit; durable in storage so reload survives.
+- `execution_jobs` — Claude Code worker dispatch state: queued / running / completed / failed, plus diffs and per-manager review markers (`manager_seen_at`).
+- `dropnotes` — ambient capture from the always-on dropnote box; not tied to any project.
+
+The manager DO reads `.ceo/*.md` from the project's repo on each chat turn (with a 60s cache in DO storage). The D1 projects table holds no goal, no state, no briefing — those come from the repo.
+
+If the operational database were lost, every project's *substance* would survive in its repo. Only chat histories, the dropnote stream, and in-flight worker jobs would be lost.
 
 ---
 

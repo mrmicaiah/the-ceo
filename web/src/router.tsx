@@ -1,4 +1,4 @@
-// Workspace-aware URL routing — v2 shape.
+// Workspace-aware URL routing — v3.
 //
 // The URL is a reflection of activeWorkspaceId, not a separate source of
 // truth. Two-way sync between window.location and store state happens in
@@ -6,8 +6,14 @@
 //
 //   /                  → empty / no project active
 //   /projects/:id      → that project's workspace is active
+//
+// v3 wrinkle: opening a project requires `repoFullName` (denormalized into
+// workspace state for the pane header). URL-based opens (deep-link or
+// popstate where the workspace isn't already open in memory) fetch the
+// project row first to obtain repoFullName, then open.
 
 import { useEffect, useRef } from "react";
+import { getProject } from "./lib/api";
 import { useStore } from "./state/store";
 import type { WorkspaceId } from "./types";
 
@@ -29,6 +35,20 @@ export function pathForWorkspace(workspaceId: WorkspaceId | null): string {
   return `/projects/${projectId}`;
 }
 
+/** Open a project by fetching its repo full-name first. Silent on 404. */
+async function openProjectFromUrl(
+  projectId: string,
+  openProject: (projectId: string, repoFullName: string) => void,
+): Promise<void> {
+  try {
+    const project = await getProject(projectId);
+    openProject(projectId, project.repoFullName);
+  } catch {
+    // 404 / unauthenticated / network — leave URL stale; the empty-state
+    // workspace covers the no-op case.
+  }
+}
+
 /**
  * Mount once inside the store context (in App.tsx). Three jobs:
  *   1. On mount, reconcile URL with persisted state — if URL is /projects/:id,
@@ -46,11 +66,19 @@ export function useUrlSync(): void {
     reconciledRef.current = true;
     const route = parsePath(window.location.pathname);
     if (route.kind === "project") {
-      openProject(route.projectId);
+      // If already in persisted workspaces, switch; otherwise fetch + open.
+      const existing = state.workspaces.find((w) => w.projectId === route.projectId);
+      if (existing) {
+        switchToProject(route.projectId);
+      } else {
+        void openProjectFromUrl(route.projectId, openProject);
+      }
     }
     // empty / not-found → leave URL alone; activeWorkspaceId effect will
     // push the canonical path on next state change.
-  }, [openProject]);
+    // (Deliberately uses state.workspaces from the closure; this runs once.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Push URL whenever activeWorkspaceId changes.
   const lastPushedRef = useRef<string | null>(null);
@@ -67,16 +95,15 @@ export function useUrlSync(): void {
     const onPop = () => {
       const route = parsePath(window.location.pathname);
       if (route.kind === "project") {
-        // If the workspace is already open, just switch; else open it.
-        switchToProject(route.projectId);
-        // Fallback to open if switch didn't find a matching workspace.
-        // (switch is a no-op when the workspace isn't open.)
         const existing = state.workspaces.some(
           (w) => w.projectId === route.projectId,
         );
-        if (!existing) openProject(route.projectId);
+        if (existing) {
+          switchToProject(route.projectId);
+        } else {
+          void openProjectFromUrl(route.projectId, openProject);
+        }
       }
-      // empty → don't force-close anything; user can close from UI.
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);

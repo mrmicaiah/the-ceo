@@ -1,17 +1,12 @@
 // A single message in the transcript. Renders markdown for assistant
 // messages (paragraphs, emphasis, code, lists) and intercepts every fenced
-// action block (```dispatch_claude_code, ```create_project, ```rename_project,
-// ```update_briefing, ```create_repo), replacing them with their
-// corresponding affordance or note component.
+// action block (v3: only ```dispatch_claude_code), replacing it with the
+// inline affordance.
 
 import { useMemo, type ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CreateProjectSuggestion } from "./CreateProjectSuggestion";
-import { CreateRepoSuggestion } from "./CreateRepoSuggestion";
 import { DispatchClaudeCodeSuggestion } from "./DispatchClaudeCodeSuggestion";
-import { RenameNote } from "./RenameNote";
-import { BriefingUpdateNote } from "./BriefingUpdateNote";
 import { ACTION_LANGS, parseActionBlock, type ParsedAction } from "../lib/actions";
 
 interface Props {
@@ -179,47 +174,12 @@ function AssistantContent({
 function ActionRenderer({
   action,
   sourceChatId,
-  isLive,
 }: {
   action: ParsedAction;
   sourceChatId: string;
   isLive: boolean;
 }) {
   switch (action.type) {
-    case "create_project":
-      return (
-        <CreateProjectSuggestion
-          name={action.name}
-          initialGoal={action.initialGoal}
-          reason={action.reason}
-        />
-      );
-    case "rename_project":
-      return (
-        <RenameNote
-          project={action.project}
-          newName={action.newName}
-          isLive={isLive}
-        />
-      );
-    case "update_briefing":
-      return (
-        <BriefingUpdateNote
-          project={action.project}
-          field={action.field}
-          value={action.value}
-          isLive={isLive}
-        />
-      );
-    case "create_repo":
-      return (
-        <CreateRepoSuggestion
-          name={action.name}
-          description={action.description}
-          isPrivate={action.isPrivate}
-          project={action.project}
-        />
-      );
     case "dispatch_claude_code":
       return (
         <DispatchClaudeCodeSuggestion

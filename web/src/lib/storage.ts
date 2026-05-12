@@ -51,7 +51,9 @@ export function getDispatchedJobId(
 //
 // v2 shape — workspaces are projects. Stored as a single JSON blob.
 
-const WORKSPACE_KEY = "theceo.workspaceState.v2";
+// v3 (run #10): workspace state gained `repoFullName`. New key forces a
+// reset on first load for anyone holding v2 state.
+const WORKSPACE_KEY = "theceo.workspaceState.v3";
 
 export interface PersistedWorkspaceState {
   workspaces: WorkspaceState[];
@@ -98,6 +100,7 @@ function isValidWorkspaceState(v: unknown): v is PersistedWorkspaceState {
     const ws = w as Record<string, unknown>;
     if (typeof ws.id !== "string" || !ws.id.startsWith("project:")) return false;
     if (typeof ws.projectId !== "string") return false;
+    if (typeof ws.repoFullName !== "string") return false;
     if (ws.managerChatId !== null && typeof ws.managerChatId !== "string") return false;
     if (typeof ws.minimized !== "boolean") return false;
     if (typeof ws.lastInteractionAt !== "number") return false;

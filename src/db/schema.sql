@@ -1,37 +1,36 @@
--- The CEO — D1 Schema
+-- The CEO — D1 Schema (v3)
 --
--- v2 retires named specialists, the CEO surface, and the wrap/report flow.
--- The schema here reflects the v2 state; legacy v1-shape columns (e.g.,
--- chats.employee_id, the reports/status_pings tables) are intentionally
--- preserved as nullable / empty so the migration is non-destructive at the
--- structural level. v2 writes do not populate them.
+-- v3 (run #10): GitHub is the project list. The `projects` table is now
+-- minimum chat plumbing — one row per claimed repo, holding only the
+-- identifying tuple. The substantive project memory (goal, context,
+-- decisions, current state) lives in `.ceo/*.md` files committed to the
+-- repo itself; the manager reads those on every chat turn.
+--
+-- v3 retirements from v2: the `briefings` table is gone. Its job moved to
+-- `.ceo/goal.md`, `.ceo/context.md`, `.ceo/decisions.md`, `.ceo/board.md`
+-- in each project's repo.
+--
+-- Legacy v1 columns (reports/status_pings tables, chats.employee_id,
+-- chats.parent_chat_id) are still preserved structurally with no data —
+-- they may return if wrap/handoff are re-enabled.
 
 -- ── Projects ───────────────────────────────────────────────────────
+-- One row per claimed repo. The full name (`owner/repo`) is the unique
+-- key; clone_url is what the agent needs to actually fetch the code.
 
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dormant', 'archived')),
-  repo_path TEXT,
-  clone_url TEXT,
+  repo_full_name TEXT NOT NULL UNIQUE,
+  clone_url TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ── Briefings (one per project, current snapshot) ──────────────────
-
-CREATE TABLE IF NOT EXISTS briefings (
-  project_id TEXT PRIMARY KEY REFERENCES projects(id),
-  goal TEXT NOT NULL DEFAULT '',
-  state TEXT NOT NULL DEFAULT '',
-  next_move TEXT NOT NULL DEFAULT '',
-  why TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+CREATE INDEX IF NOT EXISTS idx_projects_repo_full_name ON projects(repo_full_name);
 
 -- ── Chats ──────────────────────────────────────────────────────────
--- v2: one chat per project (the manager's conversation). employee_id is
--- preserved as a nullable column for backward shape; v2 writes leave it
--- NULL. The CHECK fires only when a value is set, so this remains valid.
+-- v3: one chat per project (the manager's conversation). employee_id and
+-- parent_chat_id are preserved as nullable columns for backward shape;
+-- v3 writes leave them NULL. The CHECK fires only when a value is set.
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
@@ -56,8 +55,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at);
 
 -- ── Execution jobs ─────────────────────────────────────────────────
--- manager_seen_at (was dex_seen_at in v1) — "the manager hasn't reviewed
--- this terminal job yet" marker. Same semantics, renamed for v2.
+-- manager_seen_at = "the manager hasn't reviewed this terminal job yet"
 
 CREATE TABLE IF NOT EXISTS execution_jobs (
   id TEXT PRIMARY KEY,
@@ -76,8 +74,7 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON execution_jobs(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_manager_unseen ON execution_jobs(project_id, status, manager_seen_at);
 
--- ── Reports / pings (legacy, preserved structurally — unused in v2) ─
--- Wrap is parked, not removed. These tables remain in case wrap returns.
+-- ── Reports / pings (legacy v1, preserved structurally — unused in v3) ─
 
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
@@ -100,9 +97,9 @@ CREATE TABLE IF NOT EXISTS status_pings (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ── Dropnotes (v2) ─────────────────────────────────────────────────
--- The user's stray-thought stream. Not tied to a project; surfaced through
--- the always-on dropnote box at bottom-left of the app.
+-- ── Dropnotes ──────────────────────────────────────────────────────
+-- v2-introduced; v3 preserves data and shape. The user's stray-thought
+-- stream. Not tied to a project.
 
 CREATE TABLE IF NOT EXISTS dropnotes (
   id TEXT PRIMARY KEY,

@@ -1,21 +1,21 @@
-// Thin API client for The CEO's Worker. v2 surface.
+// Thin API client for The CEO's Worker. v3 surface.
 //
-// Streaming endpoints emit SSE in the format the Worker's chat primitive
-// produces:
-//   event: text   data: {"delta": "..."}
-//   event: done   data: {}
-//   event: error  data: {"message": "..."}
-// Consumers expose callback-based handlers (onChunk / onDone / onError) so
-// callers don't need to know about streams or SSE framing.
+// v3 changes:
+//   - listProjects → gone (GitHub is the list)
+//   - listRepos    → new (the picker's data source)
+//   - claimRepoAsProject → new (POST /api/projects/from-repo)
+//   - createNewProject   → new (POST /api/projects/new — create repo + claim)
+//   - getBriefing / updateBriefingField → gone (briefings retired)
 
 import type {
-  Briefing,
   ChatWithMessages,
+  ClaimResult,
   DispatchResult,
   Dropnote,
   ExecutionJobSnapshot,
   ManagerChatResolve,
   ProjectListItem,
+  RepoListItem,
   StreamCompletedEvent,
   StreamFailedEvent,
   StreamOutputEvent,
@@ -44,13 +44,22 @@ export class ApiError extends Error {
   }
 }
 
-// ── Projects ─────────────────────────────────────────────────────────
+// ── Repos / Projects ────────────────────────────────────────────────
 
-export async function listProjects(): Promise<ProjectListItem[]> {
-  const resp = await fetch("/api/projects", { headers: headers() });
-  return jsonOrThrow<ProjectListItem[]>(resp);
+/**
+ * The picker's data source. Returns every owned, non-fork, non-archived
+ * repo on the user's GitHub account, with isProject set true when there's
+ * a matching D1 row.
+ */
+export async function listRepos(): Promise<RepoListItem[]> {
+  const resp = await fetch("/api/repos", { headers: headers() });
+  return jsonOrThrow<RepoListItem[]>(resp);
 }
 
+/**
+ * Single-project read. Used by ProjectPane if the workspace state was
+ * loaded from localStorage and needs to verify the project still exists.
+ */
 export async function getProject(projectId: string): Promise<ProjectListItem> {
   const resp = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
     headers: headers(),
@@ -58,79 +67,48 @@ export async function getProject(projectId: string): Promise<ProjectListItem> {
   return jsonOrThrow<ProjectListItem>(resp);
 }
 
-export async function createProject(input: {
-  name: string;
-  repoPath?: string;
-  initialGoal?: string;
-}): Promise<ProjectListItem> {
-  const resp = await fetch("/api/projects", {
+/**
+ * Claim an existing repo as a project. Server inserts D1 row + scaffolds
+ * .ceo/. Idempotent — claiming an already-claimed repo returns its
+ * existing project row with isNew=false.
+ */
+export async function claimRepoAsProject(input: {
+  repoFullName: string;
+  cloneUrl: string;
+  defaultBranch: string;
+}): Promise<ClaimResult> {
+  const resp = await fetch("/api/projects/from-repo", {
     method: "POST",
     headers: headers({ "Content-Type": "application/json" }),
     body: JSON.stringify(input),
   });
-  return jsonOrThrow<ProjectListItem>(resp);
+  return jsonOrThrow<ClaimResult>(resp);
 }
 
-export async function patchProject(
-  projectId: string,
-  patch: { name?: string; repoPath?: string | null },
-): Promise<ProjectListItem> {
-  const resp = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
-    method: "PATCH",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify(patch),
-  });
-  return jsonOrThrow<ProjectListItem>(resp);
-}
-
-export async function updateBriefingField(
-  projectId: string,
-  field: "goal" | "state" | "nextMove" | "why",
-  value: string,
-): Promise<Briefing> {
-  const resp = await fetch(
-    `/api/projects/${encodeURIComponent(projectId)}/briefing-update`,
-    {
-      method: "POST",
-      headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ field, value }),
-    },
-  );
-  return jsonOrThrow<Briefing>(resp);
-}
-
-export interface CreatedRepo {
-  name: string;
-  htmlUrl: string;
-  cloneUrl: string;
-  projectId?: string;
-}
-export async function createGithubRepo(input: {
+/**
+ * Create a brand-new GitHub repo and immediately claim it as a project.
+ * Server creates the repo (auto_init), then runs the claim flow (D1 row
+ * + .ceo/ scaffold).
+ */
+export async function createNewProject(input: {
   name: string;
   description?: string;
   isPrivate?: boolean;
-  projectId?: string;
-}): Promise<CreatedRepo> {
-  const resp = await fetch("/api/github/create-repo", {
+}): Promise<ClaimResult> {
+  const resp = await fetch("/api/projects/new", {
     method: "POST",
     headers: headers({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       name: input.name,
       description: input.description,
       private: input.isPrivate ?? true,
-      projectId: input.projectId,
     }),
   });
-  return jsonOrThrow<CreatedRepo>(resp);
+  return jsonOrThrow<ClaimResult>(resp);
 }
 
 // ── Manager chat ────────────────────────────────────────────────────
 
-/**
- * Resolve (or create) the canonical manager chat for this project.
- * Idempotent: repeated calls return the same chatId. Called on workspace
- * open so the chat history can be loaded before the user sends anything.
- */
 export async function resolveManagerChat(projectId: string): Promise<ManagerChatResolve> {
   const resp = await fetch(
     `/api/projects/${encodeURIComponent(projectId)}/manager-chat`,
@@ -229,16 +207,6 @@ export function openJobStream(jobId: string, h: JobStreamHandlers): () => void {
   return () => ctrl.abort();
 }
 
-// ── Briefing ─────────────────────────────────────────────────────────
-
-export async function getBriefing(projectId: string): Promise<Briefing> {
-  const resp = await fetch(
-    `/api/projects/${encodeURIComponent(projectId)}/briefing`,
-    { headers: headers() },
-  );
-  return jsonOrThrow<Briefing>(resp);
-}
-
 // ── Chats ───────────────────────────────────────────────────────────
 
 export async function getChat(chatId: string): Promise<ChatWithMessages | null> {
@@ -277,7 +245,6 @@ export interface StreamResult {
   chatId: string;
 }
 
-/** POST to the manager chat endpoint for a project, stream the reply. */
 export async function sendManagerMessage(
   input: { projectId: string; chatId: string; message: string },
   handlers: StreamHandlers,
