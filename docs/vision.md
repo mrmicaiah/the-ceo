@@ -1,5 +1,7 @@
 # Vision
 
+> **Note:** This document describes **v1** of The CEO. **v2** is described in [`design-v2.md`](design-v2.md). The principles below (the bright line, work-with-the-user, managers-not-tasks) carry forward unchanged. The architecture has changed: v1's CEO chief-of-staff + four named specialists (Nora, Iris, Theo, Dex) has been retired. v2 has one **manager** per project bound to that project's repo, a cross-project **Brainstorm Room** (coming), and a **Board** (coming). Read this document for the soul of the product; read `design-v2.md` for the current shape.
+
 ## The frustration
 
 We've built a lot of task managers. None of them stuck. The reason: **tasks are dead.** A task is a snapshot — "do this thing" — with no context, no judgment, and no ability to talk back when reality changes. Lists of tasks are inert. They don't help you when you're confused about what to do next. They don't notice when a project has gone off the rails. They don't remember why they exist.

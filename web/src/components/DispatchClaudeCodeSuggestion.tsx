@@ -1,4 +1,4 @@
-// Inline affordance for Dex's dispatch_claude_code block.
+// Inline affordance for the manager's dispatch_claude_code block.
 //
 // Two states: idle (the "Suggested Claude Code run" card with the prompt
 // preview and a "Run Claude Code →" link) and live (mounts ClaudeCodeJobPanel,

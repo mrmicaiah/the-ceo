@@ -1,6 +1,8 @@
 // Mirror of the public API surface from the Worker. CamelCase throughout.
-
-export type EmployeeId = "nora" | "iris" | "theo" | "dex";
+//
+// v2: no per-employee identity. `EmployeeId`, employee chat metadata, and
+// per-chat openChats[] arrays are gone. A workspace is a project; the
+// manager's chat is the workspace's content.
 
 export type Signal =
   | "progress"
@@ -32,32 +34,11 @@ export interface Briefing {
   updatedAt: string;
 }
 
-export interface Report {
-  id: string;
-  projectId: string;
-  fromEmployee: EmployeeId;
-  parentNodeId: string | null;
-  askedToDo: string;
-  whatHappened: string;
-  artifact: string | null;
-  openQuestions: string | null;
-  recommendedNextMove: string;
-  createdAt: string;
-}
-
-export interface StatusPing {
-  projectId: string;
-  summary: string;
-  signal: Signal;
-  createdAt: string;
-}
-
 export type ChatStatus = "active" | "wrapped";
 
 export interface ChatWithMessages {
   id: string;
   projectId: string | null;
-  employeeId: EmployeeId | null;
   parentChatId: string | null;
   status: ChatStatus;
   taskBrief: string;
@@ -73,19 +54,21 @@ export interface ChatMessage {
   createdAt: string;
 }
 
-export interface WrapResult {
-  wrapped: true;
-  report?: Report;
-  briefing?: Briefing;
-  ping?: StatusPing | null;
-  noReport?: boolean;
-  reason?: string;
+// Returned by GET /api/projects/:id/manager-chat — the canonical manager
+// chat id for this project. Idempotent: repeated calls return the same id.
+export interface ManagerChatResolve {
+  chatId: string;
+  projectId: string;
+  created: boolean;
 }
 
-export interface CastResult {
-  chatId: string;
-  employee: EmployeeId;
-  projectId: string;
+// ── Dropnotes (v2) ───────────────────────────────────────────────────
+
+export interface Dropnote {
+  id: string;
+  content: string;
+  createdAt: string;
+  archivedAt: string | null;
 }
 
 // ── Claude Code execution ────────────────────────────────────────────
@@ -143,27 +126,23 @@ export interface StreamFailedEvent {
   stage: "workspace" | "execution" | "diff";
 }
 
-// ── Workspaces (run #7) ──────────────────────────────────────────────
+// ── Workspaces (v2) ──────────────────────────────────────────────────
 //
-// A WorkspaceId is either "ceo" (the permanent chief-of-staff workspace)
-// or a project workspace tagged with the project's UUID. The template
-// literal type keeps usage type-safe at the union boundary.
+// A workspace IS a project. There's no longer a "ceo" workspace and no
+// openChats[] within a workspace. The manager chat is the content; we cache
+// its chatId in `managerChatId` so reload restores it without a round-trip.
+// `lastInteractionAt` and `hasUnread` support the LRU-minimize + notification
+// dot semantics for the project dock.
 
-export type WorkspaceId = "ceo" | `project:${string}`;
-
-export interface OpenChat {
-  chatId: string;
-  employeeId: EmployeeId;
-  label: string; // derived from task_brief or "untitled"
-  visible: boolean; // true = in the grid; false = minimized to tab bar
-  lastInteractionAt: number; // ms since epoch; LRU sort key for auto-minimize
-}
+export type WorkspaceId = `project:${string}`;
 
 export interface WorkspaceState {
   id: WorkspaceId;
-  projectId?: string; // present iff id starts with "project:"
-  openChats: OpenChat[]; // empty for CEO workspace; up to ~5 reasonable for projects
-  briefingCollapsed: boolean;
+  projectId: string;
+  managerChatId: string | null; // resolved lazily on first open
+  minimized: boolean;
+  lastInteractionAt: number; // ms since epoch; LRU sort key
+  hasUnread: boolean; // notification dot — true when activity on minimized
 }
 
 // Helpers used across the frontend.
@@ -171,7 +150,6 @@ export function workspaceIdForProject(projectId: string): WorkspaceId {
   return `project:${projectId}` as WorkspaceId;
 }
 
-export function projectIdFromWorkspaceId(id: WorkspaceId): string | null {
-  if (id === "ceo") return null;
+export function projectIdFromWorkspaceId(id: WorkspaceId): string {
   return id.slice("project:".length);
 }

@@ -1,26 +1,24 @@
-// Thin API client for The CEO's Worker. Same-origin in both dev (via Vite
-// proxy) and prod (the Worker serves both static assets and /api/*).
+// Thin API client for The CEO's Worker. v2 surface.
 //
 // Streaming endpoints emit SSE in the format the Worker's chat primitive
 // produces:
 //   event: text   data: {"delta": "..."}
 //   event: done   data: {}
 //   event: error  data: {"message": "..."}
-// We expose callback-based consumers (onChunk / onDone / onError) so callers
-// don't need to know about streams or SSE framing.
+// Consumers expose callback-based handlers (onChunk / onDone / onError) so
+// callers don't need to know about streams or SSE framing.
 
 import type {
   Briefing,
-  CastResult,
   ChatWithMessages,
   DispatchResult,
-  EmployeeId,
+  Dropnote,
   ExecutionJobSnapshot,
+  ManagerChatResolve,
   ProjectListItem,
   StreamCompletedEvent,
   StreamFailedEvent,
   StreamOutputEvent,
-  WrapResult,
 } from "../types";
 
 const AUTH_TOKEN = (import.meta.env.VITE_AUTH_TOKEN as string | undefined) ?? "";
@@ -73,7 +71,6 @@ export async function createProject(input: {
   return jsonOrThrow<ProjectListItem>(resp);
 }
 
-/** PATCH /api/projects/:id — partial update of name and/or repoPath. */
 export async function patchProject(
   projectId: string,
   patch: { name?: string; repoPath?: string | null },
@@ -86,7 +83,6 @@ export async function patchProject(
   return jsonOrThrow<ProjectListItem>(resp);
 }
 
-/** POST /api/projects/:id/briefing-update — single-field briefing edit. */
 export async function updateBriefingField(
   projectId: string,
   field: "goal" | "state" | "nextMove" | "why",
@@ -103,7 +99,6 @@ export async function updateBriefingField(
   return jsonOrThrow<Briefing>(resp);
 }
 
-/** POST /api/github/create-repo — creates a repo via the configured token. */
 export interface CreatedRepo {
   name: string;
   htmlUrl: string;
@@ -129,13 +124,23 @@ export async function createGithubRepo(input: {
   return jsonOrThrow<CreatedRepo>(resp);
 }
 
-// ── Claude Code dispatch ─────────────────────────────────────────────
+// ── Manager chat ────────────────────────────────────────────────────
 
 /**
- * POST /api/projects/:id/dispatch-claude-code — creates a job row and asks
- * AgentHub to send it to the local agent (or queues it if the agent is
- * offline). Returns the jobId so the frontend can subscribe to its stream.
+ * Resolve (or create) the canonical manager chat for this project.
+ * Idempotent: repeated calls return the same chatId. Called on workspace
+ * open so the chat history can be loaded before the user sends anything.
  */
+export async function resolveManagerChat(projectId: string): Promise<ManagerChatResolve> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/manager-chat`,
+    { headers: headers() },
+  );
+  return jsonOrThrow<ManagerChatResolve>(resp);
+}
+
+// ── Claude Code dispatch ─────────────────────────────────────────────
+
 export async function dispatchClaudeCode(input: {
   projectId: string;
   chatId: string;
@@ -157,7 +162,6 @@ export async function dispatchClaudeCode(input: {
   return jsonOrThrow<DispatchResult>(resp);
 }
 
-/** GET /api/jobs/:id — full persisted snapshot of a job. */
 export async function getJob(jobId: string): Promise<ExecutionJobSnapshot | null> {
   const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
     headers: headers(),
@@ -166,13 +170,6 @@ export async function getJob(jobId: string): Promise<ExecutionJobSnapshot | null
   return jsonOrThrow<ExecutionJobSnapshot>(resp);
 }
 
-/**
- * Open a Server-Sent-Events stream for a job. Returns a cleanup function
- * that closes the underlying fetch reader.
- *
- * Note: native EventSource doesn't support custom headers, so we use fetch
- * with manual SSE parsing — same pattern as streamChat() above.
- */
 export interface JobStreamHandlers {
   onOutput: (event: StreamOutputEvent) => void;
   onCompleted: (event: StreamCompletedEvent) => void;
@@ -252,65 +249,20 @@ export async function getChat(chatId: string): Promise<ChatWithMessages | null> 
   return jsonOrThrow<ChatWithMessages>(resp);
 }
 
-export async function wrapChat(chatId: string): Promise<WrapResult> {
-  const resp = await fetch(`/api/chats/${encodeURIComponent(chatId)}/wrap`, {
+// ── Dropnotes ───────────────────────────────────────────────────────
+
+export async function createDropnote(content: string): Promise<Dropnote> {
+  const resp = await fetch("/api/dropnotes", {
     method: "POST",
-    headers: headers(),
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ content }),
   });
-  return jsonOrThrow<WrapResult>(resp);
+  return jsonOrThrow<Dropnote>(resp);
 }
 
-// ── Cast ────────────────────────────────────────────────────────────
-
-export async function castEmployee(input: {
-  projectId: string;
-  employee: EmployeeId;
-  task: string;
-  sourceChatId?: string;
-}): Promise<CastResult> {
-  const resp = await fetch(
-    `/api/projects/${encodeURIComponent(input.projectId)}/cast`,
-    {
-      method: "POST",
-      headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        employee: input.employee,
-        task: input.task,
-        sourceChatId: input.sourceChatId,
-      }),
-    },
-  );
-  return jsonOrThrow<CastResult>(resp);
-}
-
-// ── Handoff ─────────────────────────────────────────────────────────
-
-/**
- * Staff-to-staff handoff. Creates a new chat under projectId with toEmployee,
- * task_brief preloaded, parent_chat_id = sourceChatId. Server rejects
- * self-handoff (from === to) with 400.
- */
-export async function handoffToColleague(input: {
-  projectId: string;
-  fromEmployee: EmployeeId;
-  toEmployee: EmployeeId;
-  brief: string;
-  sourceChatId: string;
-}): Promise<CastResult> {
-  const resp = await fetch(
-    `/api/projects/${encodeURIComponent(input.projectId)}/handoff`,
-    {
-      method: "POST",
-      headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        fromEmployee: input.fromEmployee,
-        toEmployee: input.toEmployee,
-        brief: input.brief,
-        sourceChatId: input.sourceChatId,
-      }),
-    },
-  );
-  return jsonOrThrow<CastResult>(resp);
+export async function listDropnotes(): Promise<Dropnote[]> {
+  const resp = await fetch("/api/dropnotes", { headers: headers() });
+  return jsonOrThrow<Dropnote[]>(resp);
 }
 
 // ── Streaming chat ──────────────────────────────────────────────────
@@ -325,29 +277,15 @@ export interface StreamResult {
   chatId: string;
 }
 
-/** POST to the CEO chat endpoint, stream the assistant's reply. */
-export async function sendCeoMessage(
-  input: { chatId: string; message: string },
-  handlers: StreamHandlers,
-  signal?: AbortSignal,
-): Promise<StreamResult> {
-  return streamChat("/api/ceo/chat", input, handlers, signal);
-}
-
-/** POST to an employee chat endpoint with optional project casting. */
-export async function sendEmployeeMessage(
-  input: {
-    employee: EmployeeId;
-    chatId: string;
-    message: string;
-    projectId?: string;
-  },
+/** POST to the manager chat endpoint for a project, stream the reply. */
+export async function sendManagerMessage(
+  input: { projectId: string; chatId: string; message: string },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<StreamResult> {
   return streamChat(
-    `/api/employees/${input.employee}/chat`,
-    { chatId: input.chatId, message: input.message, projectId: input.projectId },
+    `/api/projects/${encodeURIComponent(input.projectId)}/manager/chat`,
+    { chatId: input.chatId, message: input.message },
     handlers,
     signal,
   );

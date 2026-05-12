@@ -1,33 +1,30 @@
 // Renders a transcript-style message list. Speaker name in display type,
 // body in body type. Generous whitespace between messages. Auto-scrolls to
 // the bottom as new content arrives.
+//
+// v2: one speaker on the assistant side ("Manager") — no per-employee names.
 
 import { useEffect, useRef } from "react";
 import { Message } from "./Message";
-import type { ChatMessage, EmployeeId } from "../types";
+import type { ChatMessage } from "../types";
 
 interface Props {
   messages: ChatMessage[];
   streamingAssistant: string | null;
   sourceChatId: string;
-  kind: "ceo" | "employee";
-  employeeId: EmployeeId | null;
 }
 
-export function MessageList({ messages, streamingAssistant, sourceChatId, kind, employeeId }: Props) {
+export function MessageList({ messages, streamingAssistant, sourceChatId }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, streamingAssistant]);
 
-  const assistantLabel =
-    kind === "ceo" ? "The CEO" : employeeId ? employeeId[0].toUpperCase() + employeeId.slice(1) : "Assistant";
-
   return (
     <div className="px-10 py-8 max-w-[760px]">
       {messages.length === 0 && streamingAssistant === null ? (
-        <FirstGreeting kind={kind} />
+        <FirstGreeting />
       ) : (
         <ul className="space-y-10">
           {messages.map((m) => (
@@ -35,11 +32,8 @@ export function MessageList({ messages, streamingAssistant, sourceChatId, kind, 
               <Message
                 role={m.role}
                 content={m.content}
-                speakerLabel={
-                  m.role === "user" ? "You" : assistantLabel
-                }
+                speakerLabel={m.role === "user" ? "You" : "Manager"}
                 sourceChatId={sourceChatId}
-                currentEmployeeId={employeeId}
               />
             </li>
           ))}
@@ -48,10 +42,9 @@ export function MessageList({ messages, streamingAssistant, sourceChatId, kind, 
               <Message
                 role="assistant"
                 content={streamingAssistant}
-                speakerLabel={assistantLabel}
+                speakerLabel="Manager"
                 streaming
                 sourceChatId={sourceChatId}
-                currentEmployeeId={employeeId}
               />
             </li>
           )}
@@ -62,17 +55,11 @@ export function MessageList({ messages, streamingAssistant, sourceChatId, kind, 
   );
 }
 
-function FirstGreeting({ kind }: { kind: "ceo" | "employee" }) {
+function FirstGreeting() {
   return (
     <div>
-      <div className="font-display text-[15px] text-muted mb-3">
-        {kind === "ceo" ? "The CEO" : "—"}
-      </div>
-      <p className="text-ink leading-relaxed">
-        {kind === "ceo"
-          ? "What are you working on?"
-          : "Ready when you are."}
-      </p>
+      <div className="font-display text-[15px] text-muted mb-3">Manager</div>
+      <p className="text-ink leading-relaxed">Ready when you are.</p>
     </div>
   );
 }

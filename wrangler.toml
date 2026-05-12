@@ -17,12 +17,14 @@ binding = "DB"
 database_name = "the-ceo-db"
 database_id = "4e2918b0-6ac0-4a1e-b865-0aa7962d2e8e"
 
-# Durable Objects
+# Durable Objects (v2)
+#   PROJECT_DO     — per-project metadata (briefings)
+#   MANAGER_DO     — per-project manager chat (renamed from v1's EmployeeDO)
+#   AGENT_HUB_DO   — single instance, owns the agent websocket
 [durable_objects]
 bindings = [
-  { name = "CEO_DO", class_name = "CeoDO" },
   { name = "PROJECT_DO", class_name = "ProjectDO" },
-  { name = "EMPLOYEE_DO", class_name = "EmployeeDO" },
+  { name = "MANAGER_DO", class_name = "ManagerDO" },
   { name = "AGENT_HUB_DO", class_name = "AgentHubDO" },
 ]
 
@@ -34,3 +36,12 @@ new_classes = ["CeoDO", "ProjectDO", "EmployeeDO"]
 [[migrations]]
 tag = "v2"
 new_classes = ["AgentHubDO"]
+
+# v2-rebuild migration (run #9): the CEO surface is retired, and the
+# per-employee DO becomes per-project as ManagerDO.
+[[migrations]]
+tag = "v3-v2-rebuild"
+deleted_classes = ["CeoDO"]
+renamed_classes = [
+  { from = "EmployeeDO", to = "ManagerDO" },
+]

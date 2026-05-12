@@ -1,14 +1,16 @@
 // API/code-level types. CamelCase throughout — the public surface uses
 // camelCase. Snake_case appears only in raw SQL strings against the
-// `briefings`, `reports`, `status_pings`, `chats`, `messages`, etc. tables.
+// `briefings`, `chats`, `messages`, `execution_jobs`, `dropnotes` tables.
+//
+// v2: no per-employee identity. One manager per project, addressed by
+// projectId.
 
 // ── Env binding types ──────────────────────────────────────────────
 
 export interface Env {
   DB: D1Database;
-  CEO_DO: DurableObjectNamespace;
   PROJECT_DO: DurableObjectNamespace;
-  EMPLOYEE_DO: DurableObjectNamespace;
+  MANAGER_DO: DurableObjectNamespace;
   AGENT_HUB_DO: DurableObjectNamespace;
   // Static-asset binding for the built /web frontend (Cloudflare Workers Assets).
   // Optional so the Worker still compiles when the binding hasn't been added yet
@@ -54,44 +56,11 @@ export interface Briefing {
   updatedAt: string;
 }
 
-export type EmployeeId = "nora" | "iris" | "theo" | "dex";
-
-export interface Employee {
-  id: EmployeeId;
-  name: string;
-  role: string;
-  characterSheet: string;
-  userNotes: string;
-}
-
-export interface Report {
-  id: string;
-  projectId: string;
-  fromEmployee: EmployeeId;
-  parentNodeId: string | null;
-  askedToDo: string;
-  whatHappened: string;
-  artifact: string | null;
-  openQuestions: string | null;
-  recommendedNextMove: string;
-  createdAt: string;
-}
-
-export type Signal = "progress" | "blocked" | "stalled" | "done" | "needs_attention";
-
-export interface StatusPing {
-  projectId: string;
-  summary: string;
-  signal: Signal;
-  createdAt: string;
-}
-
 export type ChatStatus = "active" | "wrapped";
 
 export interface Chat {
   id: string;
   projectId: string | null;
-  employeeId: EmployeeId | null;
   parentChatId: string | null;
   status: ChatStatus;
   taskBrief: string;
@@ -122,9 +91,11 @@ export interface ExecutionJob {
   completedAt: string | null;
 }
 
-export interface CEOState {
-  longTermNotes: string;
-  patternNotes: string;
-  lastBriefingToUser: string;
-  lastUserSeenAt: string;
+// ── Dropnotes (v2) ─────────────────────────────────────────────────
+
+export interface Dropnote {
+  id: string;
+  content: string;
+  createdAt: string;
+  archivedAt: string | null;
 }

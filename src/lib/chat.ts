@@ -25,10 +25,9 @@ export interface ChatTurnOpts {
   systemPrompt: string;
   userMessage: string;
   apiKey: string;
-  // Optional context applied only when auto-creating the chat row.
+  // Optional project binding applied only when auto-creating the chat row.
+  // v2: chats are scoped to projects, not to employees.
   projectId?: string;
-  employeeId?: string;
-  taskBrief?: string;
   // Optional waitUntil (from a DurableObjectState) — when provided, the
   // assistant-message persistence is pinned to the DO's lifecycle so it
   // survives mid-stream client disconnects. Without it, persistence is
@@ -69,8 +68,8 @@ export async function handleChatTurn(opts: ChatTurnOpts): Promise<Response> {
   //    has a FK to chats(id) and D1 enforces FKs.
   await db.batch([
     db
-      .prepare("INSERT OR IGNORE INTO chats (id, project_id, employee_id, task_brief) VALUES (?, ?, ?, ?)")
-      .bind(chatId, opts.projectId ?? null, opts.employeeId ?? null, opts.taskBrief ?? ""),
+      .prepare("INSERT OR IGNORE INTO chats (id, project_id) VALUES (?, ?)")
+      .bind(chatId, opts.projectId ?? null),
     db
       .prepare("INSERT INTO messages (id, chat_id, role, content) VALUES (?, ?, 'user', ?)")
       .bind(crypto.randomUUID(), chatId, userMessage),

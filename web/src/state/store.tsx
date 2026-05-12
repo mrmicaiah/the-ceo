@@ -1,8 +1,20 @@
-// Global app state — projects list, workspaces (run #7), CEO chat id.
+// Global app state — v2 shape.
 //
-// Briefings are NO LONGER global; each project workspace owns its own briefing
-// state locally. A custom DOM event ("ceo:briefing-updated") notifies open
-// workspaces when the CEO's update_briefing action fires for their project.
+// A workspace IS a project. There's no per-chat openChats; each workspace's
+// content is the manager's conversation for that project. Visibility is per
+// workspace (minimized → top-bar chip), not per chat.
+//
+// Actions:
+//   OPEN_PROJECT           — ensure a workspace exists for this project,
+//                            activate it (focus + ensure visible)
+//   CLOSE_PROJECT          — remove the workspace entirely
+//   SWITCH_TO_PROJECT      — focus existing workspace; restore if minimized
+//   MINIMIZE_PROJECT       — send a visible workspace to the top bar
+//   RESTORE_PROJECT        — bring a minimized workspace back into the grid
+//   SET_MANAGER_CHAT_ID    — cache the resolved manager chatId
+//   TOUCH_PROJECT          — bump lastInteractionAt (LRU bookkeeping)
+//   MARK_READ              — clear the notification dot when activated
+//   MARK_UNREAD            — set the dot when activity hits a minimized ws
 
 import {
   createContext,
@@ -16,14 +28,10 @@ import {
 } from "react";
 import { listProjects } from "../lib/api";
 import {
-  defaultWorkspaceState,
-  getOrCreateCeoChatId,
   loadWorkspaceState,
   persistWorkspaceState,
 } from "../lib/storage";
 import type {
-  EmployeeId,
-  OpenChat,
   ProjectListItem,
   WorkspaceId,
   WorkspaceState,
@@ -34,56 +42,37 @@ interface AppState {
   projects: ProjectListItem[];
   projectsLoading: boolean;
   projectsError: string | null;
-  ceoChatId: string;
-  workspaces: WorkspaceState[]; // ordered; "ceo" is always first
-  activeWorkspaceId: WorkspaceId;
+  workspaces: WorkspaceState[]; // one per open project
+  activeWorkspaceId: WorkspaceId | null; // null = empty state (no project open)
 }
 
 type Action =
-  // Project list mutations (carried over from prior runs)
   | { type: "projects/loaded"; projects: ProjectListItem[] }
   | { type: "projects/error"; error: string }
   | { type: "projects/added"; project: ProjectListItem }
   | { type: "projects/updated"; project: ProjectListItem }
-  // Workspace lifecycle
-  | { type: "workspace/open"; projectId: string; activate?: boolean }
+  | { type: "workspace/open"; projectId: string }
   | { type: "workspace/close"; projectId: string }
-  | { type: "workspace/switch"; workspaceId: WorkspaceId }
-  | { type: "workspace/toggleBriefing"; workspaceId: WorkspaceId }
-  // Chat lifecycle within a workspace
-  | {
-      type: "chat/open";
-      workspaceId: WorkspaceId;
-      chatId: string;
-      employeeId: EmployeeId;
-      label: string;
-    }
-  | { type: "chat/minimize"; workspaceId: WorkspaceId; chatId: string }
-  | { type: "chat/restore"; workspaceId: WorkspaceId; chatId: string }
-  | { type: "chat/close"; workspaceId: WorkspaceId; chatId: string }
-  | { type: "chat/touch"; workspaceId: WorkspaceId; chatId: string };
+  | { type: "workspace/switch"; projectId: string }
+  | { type: "workspace/minimize"; projectId: string }
+  | { type: "workspace/restore"; projectId: string }
+  | { type: "workspace/setChatId"; projectId: string; chatId: string }
+  | { type: "workspace/touch"; projectId: string }
+  | { type: "workspace/markRead"; projectId: string }
+  | { type: "workspace/markUnread"; projectId: string };
 
-const MAX_VISIBLE_CHATS = 4;
+const MAX_VISIBLE = 4;
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    // ── Projects ────────────────────────────────────────────────────
     case "projects/loaded":
-      return {
-        ...state,
-        projects: action.projects,
-        projectsLoading: false,
-        projectsError: null,
-      };
+      return { ...state, projects: action.projects, projectsLoading: false, projectsError: null };
     case "projects/error":
       return { ...state, projectsLoading: false, projectsError: action.error };
     case "projects/added":
       return {
         ...state,
-        projects: [
-          action.project,
-          ...state.projects.filter((p) => p.id !== action.project.id),
-        ],
+        projects: [action.project, ...state.projects.filter((p) => p.id !== action.project.id)],
       };
     case "projects/updated":
       return {
@@ -93,134 +82,164 @@ function reducer(state: AppState, action: Action): AppState {
         ),
       };
 
-    // ── Workspace lifecycle ─────────────────────────────────────────
     case "workspace/open": {
       const id = workspaceIdForProject(action.projectId);
-      const exists = state.workspaces.some((w) => w.id === id);
-      const nextWorkspaces = exists
-        ? state.workspaces
-        : [
-            ...state.workspaces,
-            {
-              id,
-              projectId: action.projectId,
-              openChats: [],
-              briefingCollapsed: false,
-            } satisfies WorkspaceState,
-          ];
-      return {
-        ...state,
-        workspaces: nextWorkspaces,
-        activeWorkspaceId: action.activate === false ? state.activeWorkspaceId : id,
+      const now = Date.now();
+      const existing = state.workspaces.find((w) => w.id === id);
+      if (existing) {
+        // Already open — promote to visible, touch, focus, clear unread.
+        const updated = state.workspaces.map((w) =>
+          w.id === id
+            ? { ...w, minimized: false, lastInteractionAt: now, hasUnread: false }
+            : w,
+        );
+        return enforceVisibleCap(
+          { ...state, workspaces: updated, activeWorkspaceId: id },
+          id,
+        );
+      }
+      const fresh: WorkspaceState = {
+        id,
+        projectId: action.projectId,
+        managerChatId: null,
+        minimized: false,
+        lastInteractionAt: now,
+        hasUnread: false,
       };
+      return enforceVisibleCap(
+        {
+          ...state,
+          workspaces: [...state.workspaces, fresh],
+          activeWorkspaceId: id,
+        },
+        id,
+      );
     }
+
     case "workspace/close": {
       const id = workspaceIdForProject(action.projectId);
       const filtered = state.workspaces.filter((w) => w.id !== id);
-      // If we just closed the active workspace, fall back to CEO.
-      const nextActive: WorkspaceId =
-        state.activeWorkspaceId === id ? "ceo" : state.activeWorkspaceId;
+      let nextActive: WorkspaceId | null = state.activeWorkspaceId;
+      if (state.activeWorkspaceId === id) {
+        // Fall back to the most recently touched visible workspace; else null.
+        const candidates = filtered
+          .filter((w) => !w.minimized)
+          .sort((a, b) => b.lastInteractionAt - a.lastInteractionAt);
+        nextActive = candidates[0]?.id ?? null;
+      }
       return { ...state, workspaces: filtered, activeWorkspaceId: nextActive };
     }
-    case "workspace/switch":
-      return { ...state, activeWorkspaceId: action.workspaceId };
-    case "workspace/toggleBriefing":
-      return updateWorkspace(state, action.workspaceId, (ws) => ({
-        ...ws,
-        briefingCollapsed: !ws.briefingCollapsed,
-      }));
 
-    // ── Chat lifecycle ──────────────────────────────────────────────
-    case "chat/open": {
-      return updateWorkspace(state, action.workspaceId, (ws) => {
-        const existing = ws.openChats.find((c) => c.chatId === action.chatId);
-        const now = Date.now();
-        if (existing) {
-          // Already in the workspace — just promote to visible + bump.
-          const updated = ws.openChats.map((c) =>
-            c.chatId === action.chatId
-              ? { ...c, visible: true, lastInteractionAt: now }
-              : c,
-          );
-          return enforceVisibleCap({ ...ws, openChats: updated });
-        }
-        const newChat: OpenChat = {
-          chatId: action.chatId,
-          employeeId: action.employeeId,
-          label: action.label,
-          visible: true,
-          lastInteractionAt: now,
-        };
-        return enforceVisibleCap({
-          ...ws,
-          openChats: [...ws.openChats, newChat],
-        });
-      });
+    case "workspace/switch": {
+      const id = workspaceIdForProject(action.projectId);
+      const exists = state.workspaces.find((w) => w.id === id);
+      if (!exists) return state;
+      const now = Date.now();
+      const updated = state.workspaces.map((w) =>
+        w.id === id
+          ? { ...w, minimized: false, lastInteractionAt: now, hasUnread: false }
+          : w,
+      );
+      return enforceVisibleCap(
+        { ...state, workspaces: updated, activeWorkspaceId: id },
+        id,
+      );
     }
-    case "chat/minimize":
-      return updateWorkspace(state, action.workspaceId, (ws) => ({
-        ...ws,
-        openChats: ws.openChats.map((c) =>
-          c.chatId === action.chatId ? { ...c, visible: false } : c,
+
+    case "workspace/minimize": {
+      const id = workspaceIdForProject(action.projectId);
+      const updated = state.workspaces.map((w) =>
+        w.id === id ? { ...w, minimized: true } : w,
+      );
+      // If we minimized the active workspace, pick the next-most-recent visible
+      // one as active; otherwise leave as-is.
+      let nextActive: WorkspaceId | null = state.activeWorkspaceId;
+      if (state.activeWorkspaceId === id) {
+        const candidates = updated
+          .filter((w) => !w.minimized)
+          .sort((a, b) => b.lastInteractionAt - a.lastInteractionAt);
+        nextActive = candidates[0]?.id ?? null;
+      }
+      return { ...state, workspaces: updated, activeWorkspaceId: nextActive };
+    }
+
+    case "workspace/restore": {
+      const id = workspaceIdForProject(action.projectId);
+      const now = Date.now();
+      const updated = state.workspaces.map((w) =>
+        w.id === id
+          ? { ...w, minimized: false, lastInteractionAt: now, hasUnread: false }
+          : w,
+      );
+      return enforceVisibleCap(
+        { ...state, workspaces: updated, activeWorkspaceId: id },
+        id,
+      );
+    }
+
+    case "workspace/setChatId": {
+      const id = workspaceIdForProject(action.projectId);
+      return {
+        ...state,
+        workspaces: state.workspaces.map((w) =>
+          w.id === id ? { ...w, managerChatId: action.chatId } : w,
         ),
-      }));
-    case "chat/restore":
-      return updateWorkspace(state, action.workspaceId, (ws) => {
-        const now = Date.now();
-        const updated = ws.openChats.map((c) =>
-          c.chatId === action.chatId
-            ? { ...c, visible: true, lastInteractionAt: now }
-            : c,
-        );
-        return enforceVisibleCap({ ...ws, openChats: updated });
-      });
-    case "chat/close":
-      return updateWorkspace(state, action.workspaceId, (ws) => ({
-        ...ws,
-        openChats: ws.openChats.filter((c) => c.chatId !== action.chatId),
-      }));
-    case "chat/touch":
-      return updateWorkspace(state, action.workspaceId, (ws) => ({
-        ...ws,
-        openChats: ws.openChats.map((c) =>
-          c.chatId === action.chatId
-            ? { ...c, lastInteractionAt: Date.now() }
-            : c,
+      };
+    }
+
+    case "workspace/touch": {
+      const id = workspaceIdForProject(action.projectId);
+      return {
+        ...state,
+        workspaces: state.workspaces.map((w) =>
+          w.id === id ? { ...w, lastInteractionAt: Date.now() } : w,
         ),
-      }));
+      };
+    }
+
+    case "workspace/markRead": {
+      const id = workspaceIdForProject(action.projectId);
+      return {
+        ...state,
+        workspaces: state.workspaces.map((w) =>
+          w.id === id ? { ...w, hasUnread: false } : w,
+        ),
+      };
+    }
+
+    case "workspace/markUnread": {
+      const id = workspaceIdForProject(action.projectId);
+      return {
+        ...state,
+        workspaces: state.workspaces.map((w) =>
+          // Only flag minimized workspaces — active ones don't need a dot.
+          w.id === id && w.minimized ? { ...w, hasUnread: true } : w,
+        ),
+      };
+    }
 
     default:
       return state;
   }
 }
 
-function updateWorkspace(
-  state: AppState,
-  workspaceId: WorkspaceId,
-  fn: (ws: WorkspaceState) => WorkspaceState,
-): AppState {
+/**
+ * If more than MAX_VISIBLE workspaces are visible (not minimized), auto-
+ * minimize the oldest one by lastInteractionAt. The just-promoted workspace
+ * `protectedId` is exempt from being the victim.
+ */
+function enforceVisibleCap(state: AppState, protectedId: WorkspaceId): AppState {
+  const visible = state.workspaces.filter((w) => !w.minimized);
+  if (visible.length <= MAX_VISIBLE) return state;
+  const victims = visible
+    .filter((w) => w.id !== protectedId)
+    .sort((a, b) => a.lastInteractionAt - b.lastInteractionAt);
+  const victim = victims[0];
+  if (!victim) return state;
   return {
     ...state,
-    workspaces: state.workspaces.map((w) => (w.id === workspaceId ? fn(w) : w)),
-  };
-}
-
-/**
- * If more than MAX_VISIBLE_CHATS chats are visible, auto-minimize the one
- * with the oldest `lastInteractionAt`. Always called after any operation
- * that could push visibility above the cap (open / restore).
- */
-function enforceVisibleCap(ws: WorkspaceState): WorkspaceState {
-  const visible = ws.openChats.filter((c) => c.visible);
-  if (visible.length <= MAX_VISIBLE_CHATS) return ws;
-  let oldest = visible[0];
-  for (const c of visible) {
-    if (c.lastInteractionAt < oldest.lastInteractionAt) oldest = c;
-  }
-  return {
-    ...ws,
-    openChats: ws.openChats.map((c) =>
-      c.chatId === oldest.chatId ? { ...c, visible: false } : c,
+    workspaces: state.workspaces.map((w) =>
+      w.id === victim.id ? { ...w, minimized: true } : w,
     ),
   };
 }
@@ -230,22 +249,15 @@ interface StoreCtx {
   refreshProjects: () => Promise<void>;
   addProject: (project: ProjectListItem) => void;
   updateProjectLocal: (project: ProjectListItem) => void;
-  // Workspace actions
-  openWorkspace: (projectId: string, activate?: boolean) => void;
-  closeWorkspace: (projectId: string) => void;
-  switchWorkspace: (workspaceId: WorkspaceId) => void;
-  toggleBriefing: (workspaceId: WorkspaceId) => void;
-  // Chat actions
-  openChat: (input: {
-    workspaceId: WorkspaceId;
-    chatId: string;
-    employeeId: EmployeeId;
-    label: string;
-  }) => void;
-  minimizeChat: (workspaceId: WorkspaceId, chatId: string) => void;
-  restoreChat: (workspaceId: WorkspaceId, chatId: string) => void;
-  closeChat: (workspaceId: WorkspaceId, chatId: string) => void;
-  touchChat: (workspaceId: WorkspaceId, chatId: string) => void;
+  openProject: (projectId: string) => void;
+  closeProject: (projectId: string) => void;
+  switchToProject: (projectId: string) => void;
+  minimizeProject: (projectId: string) => void;
+  restoreProject: (projectId: string) => void;
+  setManagerChatId: (projectId: string, chatId: string) => void;
+  touchProject: (projectId: string) => void;
+  markRead: (projectId: string) => void;
+  markUnread: (projectId: string) => void;
 }
 
 const StoreContext = createContext<StoreCtx | null>(null);
@@ -257,14 +269,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       projects: [],
       projectsLoading: true,
       projectsError: null,
-      ceoChatId: getOrCreateCeoChatId(),
       workspaces: persisted.workspaces,
       activeWorkspaceId: persisted.activeWorkspaceId,
     } satisfies AppState;
   });
 
-  // Debounced persistence: every workspace/chat change writes a single
-  // localStorage blob after a quiet period.
+  // Debounced persistence: every workspace change writes after 250ms idle.
   const persistTimer = useRef<number | null>(null);
   useEffect(() => {
     if (persistTimer.current !== null) {
@@ -303,40 +313,32 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const updateProjectLocal = useCallback((project: ProjectListItem) => {
     dispatch({ type: "projects/updated", project });
   }, []);
-  const openWorkspace = useCallback((projectId: string, activate?: boolean) => {
-    dispatch({ type: "workspace/open", projectId, activate });
+  const openProject = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/open", projectId });
   }, []);
-  const closeWorkspace = useCallback((projectId: string) => {
+  const closeProject = useCallback((projectId: string) => {
     dispatch({ type: "workspace/close", projectId });
   }, []);
-  const switchWorkspace = useCallback((workspaceId: WorkspaceId) => {
-    dispatch({ type: "workspace/switch", workspaceId });
+  const switchToProject = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/switch", projectId });
   }, []);
-  const toggleBriefing = useCallback((workspaceId: WorkspaceId) => {
-    dispatch({ type: "workspace/toggleBriefing", workspaceId });
+  const minimizeProject = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/minimize", projectId });
   }, []);
-  const openChat = useCallback(
-    (input: {
-      workspaceId: WorkspaceId;
-      chatId: string;
-      employeeId: EmployeeId;
-      label: string;
-    }) => {
-      dispatch({ type: "chat/open", ...input });
-    },
-    [],
-  );
-  const minimizeChat = useCallback((workspaceId: WorkspaceId, chatId: string) => {
-    dispatch({ type: "chat/minimize", workspaceId, chatId });
+  const restoreProject = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/restore", projectId });
   }, []);
-  const restoreChat = useCallback((workspaceId: WorkspaceId, chatId: string) => {
-    dispatch({ type: "chat/restore", workspaceId, chatId });
+  const setManagerChatId = useCallback((projectId: string, chatId: string) => {
+    dispatch({ type: "workspace/setChatId", projectId, chatId });
   }, []);
-  const closeChat = useCallback((workspaceId: WorkspaceId, chatId: string) => {
-    dispatch({ type: "chat/close", workspaceId, chatId });
+  const touchProject = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/touch", projectId });
   }, []);
-  const touchChat = useCallback((workspaceId: WorkspaceId, chatId: string) => {
-    dispatch({ type: "chat/touch", workspaceId, chatId });
+  const markRead = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/markRead", projectId });
+  }, []);
+  const markUnread = useCallback((projectId: string) => {
+    dispatch({ type: "workspace/markUnread", projectId });
   }, []);
 
   const value = useMemo<StoreCtx>(
@@ -345,30 +347,30 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       refreshProjects,
       addProject,
       updateProjectLocal,
-      openWorkspace,
-      closeWorkspace,
-      switchWorkspace,
-      toggleBriefing,
-      openChat,
-      minimizeChat,
-      restoreChat,
-      closeChat,
-      touchChat,
+      openProject,
+      closeProject,
+      switchToProject,
+      minimizeProject,
+      restoreProject,
+      setManagerChatId,
+      touchProject,
+      markRead,
+      markUnread,
     }),
     [
       state,
       refreshProjects,
       addProject,
       updateProjectLocal,
-      openWorkspace,
-      closeWorkspace,
-      switchWorkspace,
-      toggleBriefing,
-      openChat,
-      minimizeChat,
-      restoreChat,
-      closeChat,
-      touchChat,
+      openProject,
+      closeProject,
+      switchToProject,
+      minimizeProject,
+      restoreProject,
+      setManagerChatId,
+      touchProject,
+      markRead,
+      markUnread,
     ],
   );
 
@@ -380,6 +382,3 @@ export function useStore(): StoreCtx {
   if (!ctx) throw new Error("useStore must be used inside AppStoreProvider");
   return ctx;
 }
-
-// Defaults exported for tests / debugging.
-export { defaultWorkspaceState };

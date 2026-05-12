@@ -1,49 +1,32 @@
-// Top-level layout. Workspace tabs span the full width across the top.
-// Below: a 260px left rail (project switcher) + the workspace content.
+// Top-level v2 layout.
 //
 //   +---------------------------------------------------------------+
-//   | [The CEO] [Project A] [Project B]            + new project    |
+//   | [Project A] [Project B] [• Project C (min)]            [+]    |  project dock
 //   +---------------------------------------------------------------+
-//   | LEFT RAIL    | WORKSPACE CONTENT                              |
-//   | (260px)      | (varies by workspace type, see Workspace.tsx)  |
+//   |                                                               |
+//   |                                                               |
+//   |               WORKSPACE — edge-to-edge pane grid              |
+//   |                                                               |
+//   |                                                               |
 //   +---------------------------------------------------------------+
+//   | [drop a note...]                  [Brainstorm Room] [Board]   |  bottom bar
+//   +---------------------------------------------------------------+
+//
+// No left rail. No right rail. No CEO permanent tab. The CEO surface is
+// retired in v2; the Brainstorm Room (later run) is its successor.
 
-import { useState } from "react";
-import { useStore } from "../state/store";
-import { LeftRail } from "./LeftRail";
-import { NewProjectModal } from "./NewProjectModal";
+import { ProjectTopBar } from "./ProjectTopBar";
 import { Workspace } from "./Workspace";
-import { WorkspaceTabBar } from "./WorkspaceTabBar";
+import { AppBottomBar } from "./AppBottomBar";
 
 export function AppShell() {
-  const { state } = useStore();
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-
   return (
     <div className="relative flex h-full w-full overflow-hidden flex-col">
-      <WorkspaceTabBar onNewProject={() => setNewProjectOpen(true)} />
-
-      <div className="flex flex-1 min-h-0">
-        <aside
-          className="shrink-0 border-r border-divider"
-          style={{ width: 260 }}
-        >
-          <LeftRail onNewProject={() => setNewProjectOpen(true)} />
-        </aside>
-        <main className="flex-1 min-w-0">
-          <Workspace
-            // Re-mount the inner Workspace when the active workspace changes
-            // so per-workspace state (briefing fetch, scroll, etc.) is fresh.
-            key={state.activeWorkspaceId}
-            workspaceId={state.activeWorkspaceId}
-          />
-        </main>
-      </div>
-
-      <NewProjectModal
-        open={newProjectOpen}
-        onClose={() => setNewProjectOpen(false)}
-      />
+      <ProjectTopBar />
+      <main className="flex-1 min-h-0 min-w-0">
+        <Workspace />
+      </main>
+      <AppBottomBar />
     </div>
   );
 }

@@ -1,39 +1,30 @@
 # The CEO
 
-**Chief Executive Orchestrator**
-
-A thinking layer that sits on top of Claude Code and runs your projects like a small staffed office.
+A thinking layer that sits on top of Claude Code and the projects you actually work on.
 
 ---
 
 ## What it is
 
-The CEO is a single AI chief of staff that holds the strategic picture across all your projects. Beneath The CEO is a small fixed staff of four AI employees, each with a defined role and personality. The CEO assigns them to your projects as needed, and they always work *with* you — never autonomously.
+Each project is a repo. Each project has a **manager** — one AI thread bound to that repo, working with you across the full breadth of project work: brainstorming, critiquing, drafting, dispatching workers, reviewing what comes back. Not a roster of specialists; one role that shifts mode in conversation, the way a real colleague would.
 
-When real code needs to be written, an employee drafts a prompt and dispatches it to **Claude Code** running locally on your machine. You stay in the loop. The system holds the context.
+When real code needs to be written, the manager drafts a Claude Code prompt and dispatches a worker to **Claude Code running locally on your machine**. You click to authorize; the worker runs; output streams back into the conversation. You stay in the loop. The system holds the context.
+
+Alongside the per-project managers: a **dropnote box** at the bottom of the screen for stray-thought capture, and (coming in later runs) a **Brainstorm Room** with two brains for cross-project thought and a **Board** for persistent visual workspace.
 
 ## The principle
 
-Tasks are dead. They're snapshots. Managers are alive — they hold context, make judgment calls, and remember why things exist. The CEO is built on managers, not tasks.
+Tasks are dead. Managers are alive — they hold context, make judgment calls, remember why things exist. The bright line: **only you change state on your work.** Managers can think, brainstorm, research, draft, review, recommend — but they cannot push code, commit, or make destructive changes without your explicit click on a confirm-affordance.
 
-## The staff
+## v1 / v2
 
-- **Nora** — Brainstormer. Loose, generative, sharp enough to push back.
-- **Iris** — Critic. Dry, precise, doesn't flatter. Reads your work and tells the truth.
-- **Theo** — Researcher. Methodical. Goes off on his own and comes back with the goods.
-- **Dex** — Builder. Lives in the repo. Drafts Claude Code prompts and runs them.
-
-Above all four sits **The CEO** — always on, sees everything, holds the goals.
+The current codebase is v2. The original v1 design (CEO chief-of-staff + four named specialists Nora, Iris, Theo, Dex) has been retired. The v2 spec lives in [`docs/design-v2.md`](docs/design-v2.md). v1 docs ([`vision.md`](docs/vision.md), [`employees.md`](docs/employees.md), [`data-model.md`](docs/data-model.md), [`v0-scope.md`](docs/v0-scope.md)) are kept as historical reference; some principles carry forward, but the architecture has changed.
 
 ## Architecture (one paragraph)
 
-Cloudflare Workers + Durable Objects + D1 hold the brain (CEO, employees, project briefings, report log, chat history). A web app is the primary interface. A small local agent on your Mac listens for execution requests from the cloud and runs Claude Code against your repos. Reports flow upward; attention flows downward.
+Cloudflare Workers + Durable Objects + D1 hold the system. Per project there is one `ManagerDO` (addressed by project UUID) and one `ProjectDO` (holding the project's briefing). A single `AgentHubDO` owns the websocket to the local agent. A React + Vite frontend bundles to static assets the Worker serves. A small Node process on your Mac/PC listens for execution requests and runs Claude Code against your repos. Reports flow up; attention flows down.
 
-Full details in [`docs/architecture.md`](docs/architecture.md).
-
-## Status
-
-v0 in progress. See [`docs/v0-scope.md`](docs/v0-scope.md) for what's being built first.
+Full details in [`docs/architecture.md`](docs/architecture.md). v2-specific design in [`docs/design-v2.md`](docs/design-v2.md).
 
 ## Local development
 
@@ -41,10 +32,10 @@ First-time setup:
 
 ```bash
 npm install              # installs root + web (npm workspaces)
-cp web/.env.example web/.env   # set VITE_AUTH_TOKEN — same string is fine for v0
+cp web/.env.example web/.env   # set VITE_AUTH_TOKEN
 ```
 
-Then create `.dev.vars` in the repo root (plain UTF-8, no BOM — see below) with all four secrets the Worker reads:
+Create `.dev.vars` in the repo root (plain UTF-8, no BOM):
 
 ```
 ANTHROPIC_API_KEY=sk-ant-…
@@ -53,81 +44,86 @@ GITHUB_TOKEN=…
 AGENT_TOKEN=…
 ```
 
-- `ANTHROPIC_API_KEY` — required. Anthropic API key for every CEO/employee chat.
-- `AUTH_TOKEN` — required. Bearer token the Worker compares against `Authorization: Bearer …` on every `/api/*` call. Must match the value baked into the frontend via `VITE_AUTH_TOKEN` in `web/.env`. Without it the Worker returns `500 {"error":"auth not configured on server"}` on every API request.
-- `GITHUB_TOKEN` — required only for the `create_repo` action. A GitHub Personal Access Token with `repo` scope (classic or fine-grained). Without it, `POST /api/github/create-repo` returns `500 {"error":"GITHUB_TOKEN not configured on server"}`; the rest of the app still works.
-- `AGENT_TOKEN` — required only for the local agent. Bearer token the agent presents on `/api/agent/ws`. Distinct from `AUTH_TOKEN`. Without it on the Worker, `/api/agent/ws` returns `500 {"error":"AGENT_TOKEN not configured on server"}`; without it on the agent side, the agent can't connect. See [`agent/README.md`](agent/README.md).
+- `ANTHROPIC_API_KEY` — required. Every manager chat call uses it.
+- `AUTH_TOKEN` — required. Bearer token gating `/api/*`. Must match `VITE_AUTH_TOKEN` baked into the frontend at build time.
+- `GITHUB_TOKEN` — required only for the `create_repo` action. GitHub PAT with `repo` scope.
+- `AGENT_TOKEN` — required only for the local agent. Bearer token the agent presents on `/api/agent/ws`.
 
-Run both the Worker and the Vite dev server with one command:
+Run both the Worker and the Vite dev server:
 
 ```bash
 npm run dev
 ```
 
-That starts:
-- the Cloudflare Worker on `http://localhost:8787` (handles `/api/*`)
-- the Vite dev server on `http://localhost:5173` (serves the React app, proxies `/api/*` to the Worker)
+- Worker on `http://localhost:8787` (handles `/api/*` and `/health`)
+- Vite dev server on `http://localhost:5173` (serves the React app, proxies `/api/*` to the Worker)
 
-Open `http://localhost:5173` in your browser.
+Open `http://localhost:5173`.
 
-Note: `.dev.vars` must be plain UTF-8 with no BOM. PowerShell's default encodings often add a BOM or write UTF-16 — verify with `file .dev.vars` (expect `ASCII text`) or `head -c 3 .dev.vars | xxd` (expect the first byte to be `41` for `A`, not `ef bb bf` or `ff fe`).
+`.dev.vars` must be UTF-8 with no BOM (`head -c 3 .dev.vars | xxd` — first byte `41` for `A`, not `ef bb bf` or `ff fe`).
 
-Wrangler dev caches `.dev.vars` values and may serve stale env on the first request after a swap. Workaround: `touch src/index.ts` (or any source file) to force a code reload after editing `.dev.vars`.
+Wrangler dev caches `.dev.vars` on first request. After editing, `touch src/index.ts` to force a code reload.
 
 ## The local agent
 
-When Dex emits a `dispatch_claude_code` block and the user clicks "Run Claude Code →", the job is dispatched over a persistent websocket to a small Node process running on the user's Mac/PC. That process clones (if missing), runs Claude Code, captures the diff, and reports back.
-
-To run it locally:
+When the manager emits a `dispatch_claude_code` block and you click "Run Claude Code →", the job dispatches over a persistent websocket to a Node process on your machine. That process clones (if missing), runs Claude Code, captures the diff, and reports back.
 
 ```bash
 cd agent
-cp .env.example .env
-# edit agent/.env — AGENT_TOKEN, WORKER_URL, REPOS_DIR, ANTHROPIC_API_KEY
+cp .env.example .env       # edit: AGENT_TOKEN, WORKER_URL, REPOS_DIR, ANTHROPIC_API_KEY
 npm install
 npm start
 ```
 
-Full agent docs in [`agent/README.md`](agent/README.md). The agent needs to be running for any `dispatch_claude_code` action to actually execute; if it's offline, the Worker queues the job and flushes it on the next agent `ready`.
+Full agent docs in [`agent/README.md`](agent/README.md). Without the agent running, dispatches queue indefinitely until the agent connects and flushes them.
 
-### Remote D1 migrations
+## Remote D1 migrations
 
-The agent flow added two columns to existing tables. If your remote D1 was created before this run, apply once:
+Schema in [`src/db/schema.sql`](src/db/schema.sql). Migration files in [`src/db/migrations/`](src/db/migrations/).
+
+### v2 rebuild (run #9)
+
+Wipes v1 conversation state, drops the per-employee notes table, renames `execution_jobs.dex_seen_at` → `manager_seen_at`, and creates the `dropnotes` table. Apply once after pulling this run:
 
 ```bash
-npx wrangler d1 execute the-ceo-db --remote --command "ALTER TABLE projects ADD COLUMN clone_url TEXT"
-npx wrangler d1 execute the-ceo-db --remote --command "ALTER TABLE execution_jobs ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
-npx wrangler d1 execute the-ceo-db --remote --command "ALTER TABLE execution_jobs ADD COLUMN dex_seen_at TEXT"
-npx wrangler d1 execute the-ceo-db --remote --command "CREATE INDEX IF NOT EXISTS idx_jobs_dex_unseen ON execution_jobs(project_id, status, dex_seen_at)"
+# Local
+npx wrangler d1 execute the-ceo-db --local --file=src/db/migrations/v2-rebuild.sql
+
+# Remote
+npx wrangler d1 execute the-ceo-db --remote --file=src/db/migrations/v2-rebuild.sql
 ```
 
-These are idempotent only across fresh DBs; on existing tables, the `ADD COLUMN` will error if the column already exists. That's expected — just skip the ones that error and continue.
+The migration is non-idempotent on the `ALTER TABLE RENAME COLUMN` step. Apply once per environment.
+
+### v1 history (kept for reference)
+
+Earlier runs added `clone_url` to `projects` and `summary` / `dex_seen_at` to `execution_jobs`. The v2 migration above subsumes the seen-marker rename; `clone_url` and `summary` are untouched.
 
 ## Deployment
 
-Single deploy target: the existing Cloudflare Worker. The built frontend ships as static assets bound to the Worker via `[assets]` in `wrangler.toml`, so the same Worker serves both `/api/*` and the SPA shell at every other path.
-
 ```bash
 npm run build    # vite build → web/dist
-npm run deploy   # wrangler deploy (pushes the Worker + bundled assets)
+npm run deploy   # wrangler deploy (Worker + bundled assets)
 ```
 
-`not_found_handling = "single-page-application"` means deep links (e.g. `/projects/abc/chat/xyz`) fall back to `index.html` so client-side routing resolves correctly.
+`not_found_handling = "single-page-application"` means deep links (e.g. `/projects/abc`) fall back to `index.html` so client-side routing resolves correctly.
 
-Production env vars (the Worker only):
+Production secrets:
 ```bash
 npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put AUTH_TOKEN
+npx wrangler secret put GITHUB_TOKEN
+npx wrangler secret put AGENT_TOKEN
 ```
-
-The frontend bundle reads `VITE_AUTH_TOKEN` at build time from `web/.env`. v0 doesn't validate it server-side; we'll harden in a later run.
 
 ## Documents
 
-- [`docs/vision.md`](docs/vision.md) — Why this exists, the soul of the product
+- [`docs/design-v2.md`](docs/design-v2.md) — **v2 spec of record** (current architecture)
 - [`docs/architecture.md`](docs/architecture.md) — Technical shape
-- [`docs/design.md`](docs/design.md) — Visual and experiential specification
-- [`docs/employees.md`](docs/employees.md) — The staff roster and character sheets
-- [`docs/data-model.md`](docs/data-model.md) — Core data structures
-- [`docs/v0-scope.md`](docs/v0-scope.md) — What's in v0, what's explicitly out
-- [`docs/smoke-tests.md`](docs/smoke-tests.md) — End-to-end curl walkthrough
+- [`docs/design.md`](docs/design.md) — Visual and experiential specification (carries forward to v2)
+- [`docs/vision.md`](docs/vision.md) — v1 vision (historical; principles carry, architecture changed)
+- [`docs/employees.md`](docs/employees.md) — v1 staff roster (historical)
+- [`docs/data-model.md`](docs/data-model.md) — v1 data model (historical)
+- [`docs/v0-scope.md`](docs/v0-scope.md) — v0 scope (historical)
+- [`docs/smoke-tests.md`](docs/smoke-tests.md) — v1 curl walkthrough (historical)
 - [`agent/README.md`](agent/README.md) — Local Claude Code execution worker

@@ -1,35 +1,22 @@
-// Grid of visible chat panes. Layout adapts by count:
+// Grid of visible project panes. v2: each cell is one project's manager
+// chat. Layout adapts by count, same logic as v1's chat grid (run #7):
 //   1 → single pane fills the area
 //   2 → side-by-side, 50/50
-//   3 → 2 on top + 1 full-width on bottom (Option A from the spec)
+//   3 → Option A: 2 on top + 1 full-width on bottom
 //   4 → 2x2
 //
-// Implemented with CSS grid so panes flex to viewport. Hairline dividers
-// applied as borders on panes (right + bottom where appropriate).
+// Hairline dividers applied as borders on panes (right + bottom where
+// appropriate).
 
-import { ChatPane } from "./ChatPane";
-import type { Briefing, OpenChat, WorkspaceId } from "../types";
+import { ProjectPane } from "./ProjectPane";
+import type { WorkspaceState } from "../types";
 
 interface Props {
-  workspaceId: WorkspaceId;
-  projectId: string;
-  visibleChats: OpenChat[];
-  onMinimize: (chatId: string) => void;
-  onClose: (chatId: string) => void;
-  onTouch: (chatId: string) => void;
-  onBriefingUpdate: (briefing: Briefing | null) => void;
+  visibleWorkspaces: WorkspaceState[];
 }
 
-export function ChatGrid({
-  workspaceId,
-  projectId,
-  visibleChats,
-  onMinimize,
-  onClose,
-  onTouch,
-  onBriefingUpdate,
-}: Props) {
-  const n = visibleChats.length;
+export function ChatGrid({ visibleWorkspaces }: Props) {
+  const n = visibleWorkspaces.length;
   if (n === 0) return null;
 
   const containerClass =
@@ -41,16 +28,11 @@ export function ChatGrid({
 
   return (
     <div className={`flex-1 grid min-h-0 ${containerClass}`}>
-      {visibleChats.map((chat, idx) => {
-        // For the 3-chat case, the 3rd pane spans both columns (full bottom row).
+      {visibleWorkspaces.map((ws, idx) => {
         const spansFull = n === 3 && idx === 2;
-
-        // Right border on left-column panes when the row has 2 items.
         const isLeftCol = idx % 2 === 0;
         const hasNeighborRight =
           !spansFull && isLeftCol && idx + 1 < n && !(n === 3 && idx + 1 === 2);
-
-        // Bottom border on top-row panes when there's a row below.
         const isTopRow = n > 2 && idx < 2;
 
         const classNames = [
@@ -62,16 +44,9 @@ export function ChatGrid({
           .join(" ");
 
         return (
-          <ChatPane
-            key={chat.chatId}
-            workspaceId={workspaceId}
-            projectId={projectId}
-            chatId={chat.chatId}
-            employeeId={chat.employeeId}
-            onMinimize={() => onMinimize(chat.chatId)}
-            onClose={() => onClose(chat.chatId)}
-            onInteraction={() => onTouch(chat.chatId)}
-            onBriefingUpdate={onBriefingUpdate}
+          <ProjectPane
+            key={ws.id}
+            projectId={ws.projectId}
             className={classNames}
           />
         );
